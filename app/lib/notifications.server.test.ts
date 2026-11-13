@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
 import { OutboxStatus, UserRole } from "~/db/schema";
@@ -9,6 +9,9 @@ import {
   devTransport,
   drainOutbox,
   notify,
+  pruneSentRows,
+  replayDeadRows,
+  resetAlertThrottle,
   TransportError,
   type OutboundNotification,
   type Transport,
@@ -281,6 +284,225 @@ describe("drainOutbox", () => {
       status: OutboxStatus.Pending,
       nextAttemptAt: new Date(NOW.getTime() + 600_000).toISOString(),
     });
+  });
+});
+
+describe("drainOutbox reliability", () => {
+  const NOW = new Date("2026-10-06T12:00:00.000Z");
+  const minutes = (n: number) => new Date(NOW.getTime() + n * 60_000);
+
+  function queueOne(at = NOW) {
+    notify(
+      db,
+      {
+        type: "refund_requested",
+        refundRequestId: refundId,
+        actorUserId: base.user.id,
+      },
+      at
+    );
+  }
+
+  const failing = (status: number): Transport => ({
+    async send() {
+      throw new TransportError("nope", status);
+    },
+  });
+
+  function silenceLog() {
+    return vi.spyOn(console, "log").mockImplementation(() => {});
+  }
+
+  beforeEach(() => {
+    resetAlertThrottle();
+  });
+
+  it("does not mark a row sent until the transport resolves", async () => {
+    queueOne();
+    let statusWhileSending: string | undefined;
+    const transport: Transport = {
+      async send() {
+        statusWhileSending = outbox()[0].status;
+      },
+    };
+    const log = silenceLog();
+
+    await drainOutbox(db, { transport, enabled: true, now: NOW });
+    log.mockRestore();
+
+    expect(statusWhileSending).toBe(OutboxStatus.Pending);
+    expect(outbox()[0].status).toBe(OutboxStatus.Sent);
+  });
+
+  it("keeps a row pending when the transport fails with a plain Error", async () => {
+    queueOne();
+    const transport: Transport = {
+      async send() {
+        throw new Error("socket hang up");
+      },
+    };
+    const log = silenceLog();
+
+    await drainOutbox(db, { transport, enabled: true, now: NOW });
+    log.mockRestore();
+
+    expect(outbox()[0]).toMatchObject({
+      status: OutboxStatus.Pending,
+      attempts: 1,
+      lastError: "socket hang up",
+    });
+  });
+
+  it("walks the whole backoff schedule", async () => {
+    queueOne();
+    const log = silenceLog();
+    const delays: number[] = [];
+    let now = NOW;
+    for (let i = 0; i < 6; i++) {
+      await drainOutbox(db, { transport: failing(503), enabled: true, now });
+      delays.push(Date.parse(outbox()[0].nextAttemptAt) - now.getTime());
+      now = new Date(Date.parse(outbox()[0].nextAttemptAt));
+    }
+    log.mockRestore();
+    expect(delays).toEqual([
+      60_000, 300_000, 1_800_000, 7_200_000, 21_600_000, 86_400_000,
+    ]);
+  });
+
+  it("logs one structured line per attempt without emails or bodies", async () => {
+    queueOne();
+    const log = silenceLog();
+    await drainOutbox(db, {
+      transport: failing(503),
+      enabled: true,
+      now: NOW,
+    });
+    const lines = log.mock.calls.map(([line]) => String(line));
+    log.mockRestore();
+
+    const attempts = lines
+      .map((line) => JSON.parse(line))
+      .filter((l) => l.event === "notification_attempt");
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({
+      outboxId: outbox()[0].id,
+      type: "refund_requested",
+      attempt: 1,
+      outcome: "retry",
+    });
+    expect(typeof attempts[0].latencyMs).toBe("number");
+    const text = lines.join("\n");
+    expect(text).not.toContain("@example.com");
+    expect(text).not.toContain("Test Course");
+  });
+
+  it("alerts by log and email to the ops address when a row goes dead", async () => {
+    queueOne();
+    const mail: { to: string; subject: string; body: string }[] = [];
+    const log = silenceLog();
+    await drainOutbox(db, {
+      transport: failing(400),
+      enabled: true,
+      now: NOW,
+      opsEmail: "ops@example.com",
+      sendAlert: async (email) => void mail.push(email),
+    });
+    const alerts = log.mock.calls
+      .map(([line]) => JSON.parse(String(line)))
+      .filter((l) => l.event === "notification_alert");
+    log.mockRestore();
+
+    expect(alerts).toMatchObject([
+      { reason: "dead", outboxId: outbox()[0].id },
+    ]);
+    expect(mail).toHaveLength(1);
+    expect(mail[0].to).toBe("ops@example.com");
+    expect(mail[0].subject).toContain("dead");
+    expect(mail[0].body).not.toContain("@example.com");
+  });
+
+  it("alerts when the oldest unsent row is older than 15 minutes, once per window", async () => {
+    queueOne();
+    const mail: unknown[] = [];
+    const options = {
+      transport: failing(503),
+      enabled: true,
+      opsEmail: "ops@example.com",
+      sendAlert: async (email: unknown) => void mail.push(email),
+    };
+    const log = silenceLog();
+
+    await drainOutbox(db, { ...options, now: minutes(14) });
+    expect(mail).toHaveLength(0);
+
+    await drainOutbox(db, { ...options, now: minutes(16) });
+    expect(mail).toHaveLength(1);
+
+    await drainOutbox(db, { ...options, now: minutes(20) });
+    expect(mail).toHaveLength(1);
+    log.mockRestore();
+  });
+
+  it("does not let a failing alert email break the drain", async () => {
+    queueOne();
+    const log = silenceLog();
+    await expect(
+      drainOutbox(db, {
+        transport: failing(400),
+        enabled: true,
+        now: NOW,
+        opsEmail: "ops@example.com",
+        sendAlert: async () => {
+          throw new Error("postmark down");
+        },
+      })
+    ).resolves.toBeUndefined();
+    log.mockRestore();
+  });
+
+  it("replays dead rows from scratch with the same id", async () => {
+    queueOne();
+    const log = silenceLog();
+    await drainOutbox(db, { transport: failing(400), enabled: true, now: NOW });
+    log.mockRestore();
+    const id = outbox()[0].id;
+    const count = outbox().filter((r) => r.status === OutboxStatus.Dead).length;
+
+    expect(replayDeadRows(db, minutes(60))).toBe(count);
+
+    expect(outbox().find((r) => r.id === id)).toMatchObject({
+      status: OutboxStatus.Pending,
+      attempts: 0,
+      nextAttemptAt: minutes(60).toISOString(),
+    });
+  });
+
+  it("prunes sent rows past the retention window and keeps dead rows", async () => {
+    queueOne();
+    const log = silenceLog();
+    await drainOutbox(db, {
+      transport: { async send() {} },
+      enabled: true,
+      now: NOW,
+    });
+    log.mockRestore();
+    db.insert(schema.notificationOutbox)
+      .values({
+        type: "refund_requested",
+        recipientUserId: base.user.id,
+        payload: "{}",
+        status: OutboxStatus.Dead,
+        nextAttemptAt: NOW.toISOString(),
+        createdAt: NOW.toISOString(),
+      })
+      .run();
+    const sentCount = outbox().filter(
+      (r) => r.status === OutboxStatus.Sent
+    ).length;
+
+    expect(pruneSentRows(db, minutes(6 * 24 * 60))).toBe(0);
+    expect(pruneSentRows(db, minutes(8 * 24 * 60))).toBe(sentCount);
+    expect(outbox().map((r) => r.status)).toEqual([OutboxStatus.Dead]);
   });
 });
 
