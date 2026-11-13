@@ -25,6 +25,7 @@
   "dependencies": {
     "@hello-pangea/dnd": "^18.0.1",
     "@monaco-editor/react": "^4.7.0",
+    "@novu/react": "^3.19.2",
     "@react-router/node": "8.3.0",
     "@react-router/serve": "8.3.0",
     "@tailwindcss/typography": "^0.5.19",

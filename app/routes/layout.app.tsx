@@ -3,6 +3,8 @@ import type { Route } from "./+types/layout.app";
 import { Sidebar } from "~/components/sidebar";
 import { DevUI } from "~/components/dev-ui";
 import { Toaster } from "sonner";
+import { NovuProvider } from "@novu/react";
+import { getInboxConfig } from "~/lib/novu-inbox.server";
 import { getCurrentUserId, getDevCountry } from "~/lib/session";
 import { getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
 import { eq, and, or, sql, desc } from "drizzle-orm";
@@ -213,6 +215,8 @@ export async function loader({ request }: Route.LoaderArgs) {
     countryTierInfo,
     countries: COUNTRIES,
     isTeamAdmin: currentUserId ? isTeamAdmin(currentUserId) : false,
+    // Subscriber hash is computed here from NOVU_SECRET_KEY; the secret never leaves the server.
+    inbox: getInboxConfig(currentUserId),
   };
 }
 
@@ -225,14 +229,16 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
     countryTierInfo,
     countries,
     isTeamAdmin: userIsTeamAdmin,
+    inbox,
   } = loaderData;
 
-  return (
+  const shell = (
     <div className="flex h-screen overflow-hidden">
       <Sidebar
         currentUser={currentUser}
         recentCourses={recentCourses}
         isTeamAdmin={userIsTeamAdmin}
+        showUnreadBadge={inbox !== null}
       />
       <main className="flex-1 overflow-y-auto">
         <Outlet />
@@ -246,5 +252,17 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
       />
       <Toaster position="bottom-right" richColors closeButton />
     </div>
+  );
+
+  if (!inbox) return shell;
+
+  return (
+    <NovuProvider
+      applicationIdentifier={inbox.applicationIdentifier}
+      subscriberId={inbox.subscriberId}
+      subscriberHash={inbox.subscriberHash}
+    >
+      {shell}
+    </NovuProvider>
   );
 }
