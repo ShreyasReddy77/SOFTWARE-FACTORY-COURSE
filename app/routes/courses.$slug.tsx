@@ -50,6 +50,7 @@ import {
   getCountryTierInfo,
 } from "~/lib/ppp";
 import { parseFormData } from "~/lib/validation";
+import { notify } from "~/lib/notifications.server";
 import { MAX_RATING, MIN_RATING } from "~/lib/ratings";
 import { StarRating, StarRatingInput } from "~/components/star-rating";
 
@@ -355,11 +356,16 @@ function rateCourse(userId: number, courseId: number, rating: number) {
       .get();
   }
 
-  return db
-    .insert(courseRatings)
-    .values({ userId, courseId, rating })
-    .returning()
-    .get();
+  // The notification row commits or rolls back with the rating.
+  return db.transaction((tx) => {
+    const created = tx
+      .insert(courseRatings)
+      .values({ userId, courseId, rating })
+      .returning()
+      .get();
+    notify(tx, { type: "rating_created", ratingId: created.id });
+    return created;
+  });
 }
 
 const ratingSchema = z.object({

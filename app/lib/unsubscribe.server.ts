@@ -83,3 +83,24 @@ export async function unsubscribeFromActivityType(options: UnsubscribeOptions) {
     throw new Error(`Novu preferences update responded ${response.status}`);
   }
 }
+
+/**
+ * The one-click unsubscribe link for an Activity email. The base URL comes from
+ * APP_BASE_URL (default http://localhost:5173) and the secret from
+ * NOTIFICATIONS_UNSUBSCRIBE_SECRET. Returns null when no secret is configured,
+ * so a missing secret never fails the domain write that triggered the notify.
+ */
+export function buildUnsubscribeUrl(
+  userId: number,
+  activityType: ActivityType,
+  options: { secret?: string; baseUrl?: string } = {}
+): string | null {
+  const secret = options.secret ?? process.env.NOTIFICATIONS_UNSUBSCRIBE_SECRET;
+  if (!secret) return null;
+  const baseUrl = (
+    options.baseUrl ??
+    process.env.APP_BASE_URL ??
+    "http://localhost:5173"
+  ).replace(/\/+$/, "");
+  return `${baseUrl}/unsubscribe/${signUnsubscribeToken(secret, userId, activityType)}`;
+}

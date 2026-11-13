@@ -36,7 +36,7 @@ describe("notify: welcome (type 8)", () => {
 
     notify(db, { type: "enrollment_created", enrollmentId: enrollment.id });
 
-    const rows = outbox();
+    const rows = outbox().filter((r) => r.type === "welcome");
     expect(rows).toHaveLength(1);
     expect(rows[0].type).toBe("welcome");
     expect(rows[0].recipientUserId).toBe(base.user.id);

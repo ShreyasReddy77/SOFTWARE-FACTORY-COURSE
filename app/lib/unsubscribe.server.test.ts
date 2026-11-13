@@ -3,7 +3,29 @@ import {
   signUnsubscribeToken,
   verifyUnsubscribeToken,
   unsubscribeFromActivityType,
+  buildUnsubscribeUrl,
 } from "./unsubscribe.server";
+
+describe("buildUnsubscribeUrl", () => {
+  it("builds a verifiable /unsubscribe/<token> URL from the base URL", () => {
+    const url = buildUnsubscribeUrl(7, "new_comment", {
+      secret: "s3",
+      baseUrl: "https://cadence.example/",
+    });
+    expect(url).toMatch(/^https:\/\/cadence\.example\/unsubscribe\/[^/]+$/);
+    const token = (url ?? "").split("/unsubscribe/")[1];
+    expect(verifyUnsubscribeToken("s3", token)).toEqual({
+      userId: 7,
+      activityType: "new_comment",
+    });
+  });
+
+  it("returns null when no secret is configured", () => {
+    expect(
+      buildUnsubscribeUrl(7, "new_rating", { secret: "", baseUrl: "https://x" })
+    ).toBeNull();
+  });
+});
 
 const SECRET = "test-secret";
 

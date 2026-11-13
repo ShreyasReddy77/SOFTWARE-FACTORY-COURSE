@@ -4,9 +4,13 @@ import { and, asc, eq, lt, lte } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
 import {
+  comments,
   coupons,
+  courseRatings,
   courses,
   enrollments,
+  lessons,
+  modules,
   notificationOutbox,
   OutboxStatus,
   purchases,
@@ -17,6 +21,7 @@ import {
   UserRole,
 } from "~/db/schema";
 import { novuTransport } from "./novu-transport.server";
+import { buildUnsubscribeUrl, type ActivityType } from "./unsubscribe.server";
 
 /** An ops alert email. */
 export type Email = { to: string; subject: string; body: string };
@@ -51,7 +56,11 @@ export type NotificationType =
   | "refund_declined"
   | "enrollment_ended"
   | "welcome"
-  | "seat_claimed";
+  | "seat_claimed"
+  | "new_enrollment"
+  | "new_comment"
+  | "comment_reply"
+  | "new_rating";
 
 /** What happened. `actorUserId` is the person who did it. */
 export type NotificationEvent =
@@ -77,6 +86,16 @@ export type NotificationEvent =
       /** A Student claimed a Seat; tells the Team Admin. */
       type: "seat_claimed";
       couponId: number;
+    }
+  | {
+      /** A comment was posted: a top-level one (type 11) or a reply (type 12). */
+      type: "comment_created";
+      commentId: number;
+    }
+  | {
+      /** A Student rated a course for the first time (type 13). */
+      type: "rating_created";
+      ratingId: number;
     };
 
 export function notify(
@@ -113,7 +132,11 @@ function resolveDeliveries(
     case "refund_requested":
       return refundRequested(db, event);
     case "enrollment_created":
-      return welcome(db, event);
+      return [...welcome(db, event), ...newEnrollment(db, event)];
+    case "comment_created":
+      return commentCreated(db, event);
+    case "rating_created":
+      return ratingCreated(db, event);
     case "seat_claimed":
       return seatClaimed(db, event);
     case "refund_approved":
@@ -207,6 +230,164 @@ function welcome(
         courseId: row.courseId,
         courseTitle: row.courseTitle,
         courseUrl: `/courses/${row.courseSlug}`,
+      },
+    },
+  ];
+}
+
+// ─── Activity (types 10-13) ───
+// Every payload carries courseId (the Instructor digest is keyed on it) and an
+// unsubscribeUrl for the email footer. The actor is never a recipient.
+
+function activityLinks(
+  recipientUserId: number,
+  activityType: ActivityType
+): { unsubscribeUrl: string | null } {
+  return {
+    unsubscribeUrl: buildUnsubscribeUrl(recipientUserId, activityType),
+  };
+}
+
+function newEnrollment(
+  db: Queryable,
+  event: Extract<NotificationEvent, { type: "enrollment_created" }>
+): Delivery[] {
+  const row = db
+    .select({
+      enrollmentId: enrollments.id,
+      studentId: enrollments.userId,
+      studentName: users.name,
+      courseId: courses.id,
+      courseTitle: courses.title,
+      courseSlug: courses.slug,
+      instructorId: courses.instructorId,
+    })
+    .from(enrollments)
+    .innerJoin(courses, eq(courses.id, enrollments.courseId))
+    .innerJoin(users, eq(users.id, enrollments.userId))
+    .where(eq(enrollments.id, event.enrollmentId))
+    .get();
+  if (!row) throw new Error(`Enrollment ${event.enrollmentId} not found`);
+  if (row.instructorId === row.studentId) return [];
+
+  return [
+    {
+      type: "new_enrollment",
+      recipientUserId: row.instructorId,
+      payload: {
+        enrollmentId: row.enrollmentId,
+        courseId: row.courseId,
+        courseTitle: row.courseTitle,
+        courseUrl: `/courses/${row.courseSlug}`,
+        studentName: row.studentName,
+        ...activityLinks(row.instructorId, "new_enrollment"),
+      },
+    },
+  ];
+}
+
+function commentCreated(
+  db: Queryable,
+  event: Extract<NotificationEvent, { type: "comment_created" }>
+): Delivery[] {
+  const row = db
+    .select({
+      commentId: comments.id,
+      parentId: comments.parentId,
+      authorId: comments.userId,
+      authorName: users.name,
+      lessonId: comments.lessonId,
+      courseId: courses.id,
+      courseTitle: courses.title,
+      courseSlug: courses.slug,
+      instructorId: courses.instructorId,
+    })
+    .from(comments)
+    .innerJoin(users, eq(users.id, comments.userId))
+    .innerJoin(lessons, eq(lessons.id, comments.lessonId))
+    .innerJoin(modules, eq(modules.id, lessons.moduleId))
+    .innerJoin(courses, eq(courses.id, modules.courseId))
+    .where(eq(comments.id, event.commentId))
+    .get();
+  if (!row) throw new Error(`Comment ${event.commentId} not found`);
+
+  const facts = {
+    commentId: row.commentId,
+    courseId: row.courseId,
+    courseTitle: row.courseTitle,
+    lessonId: row.lessonId,
+    lessonUrl: `/courses/${row.courseSlug}/lessons/${row.lessonId}`,
+  };
+
+  if (row.parentId === null) {
+    if (row.instructorId === row.authorId) return [];
+    return [
+      {
+        type: "new_comment",
+        recipientUserId: row.instructorId,
+        payload: {
+          ...facts,
+          commenterName: row.authorName,
+          ...activityLinks(row.instructorId, "new_comment"),
+        },
+      },
+    ];
+  }
+
+  const parent = db
+    .select({ authorId: comments.userId })
+    .from(comments)
+    .where(eq(comments.id, row.parentId))
+    .get();
+  if (!parent) throw new Error(`Comment ${row.parentId} not found`);
+  if (parent.authorId === row.authorId) return [];
+
+  return [
+    {
+      type: "comment_reply",
+      recipientUserId: parent.authorId,
+      payload: {
+        ...facts,
+        parentCommentId: row.parentId,
+        replierName: row.authorName,
+        ...activityLinks(parent.authorId, "comment_reply"),
+      },
+    },
+  ];
+}
+
+function ratingCreated(
+  db: Queryable,
+  event: Extract<NotificationEvent, { type: "rating_created" }>
+): Delivery[] {
+  const row = db
+    .select({
+      ratingId: courseRatings.id,
+      rating: courseRatings.rating,
+      raterId: courseRatings.userId,
+      courseId: courses.id,
+      courseTitle: courses.title,
+      courseSlug: courses.slug,
+      instructorId: courses.instructorId,
+    })
+    .from(courseRatings)
+    .innerJoin(courses, eq(courses.id, courseRatings.courseId))
+    .where(eq(courseRatings.id, event.ratingId))
+    .get();
+  if (!row) throw new Error(`Rating ${event.ratingId} not found`);
+  if (row.instructorId === row.raterId) return [];
+
+  return [
+    {
+      type: "new_rating",
+      recipientUserId: row.instructorId,
+      payload: {
+        ratingId: row.ratingId,
+        rating: row.rating,
+        courseId: row.courseId,
+        courseTitle: row.courseTitle,
+        courseUrl: `/courses/${row.courseSlug}`,
+        ...activityLinks(row.instructorId, "new_rating"),
       },
     },
   ];
