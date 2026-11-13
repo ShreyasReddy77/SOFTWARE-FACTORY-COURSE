@@ -374,3 +374,45 @@ export const videoWatchEvents = sqliteTable("video_watch_events", {
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
 });
+
+export enum OutboxStatus {
+  Pending = "pending",
+  Sent = "sent",
+  Dead = "dead",
+}
+
+// Notifications waiting to be handed to the transport. A row is written in the
+// same transaction as the domain change that caused it. See ADR 0014.
+export const notificationOutbox = sqliteTable(
+  "notification_outbox",
+  {
+    // Doubles as the Idempotency-Key sent with every delivery attempt.
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    // A NotificationType, e.g. "refund_requested".
+    type: text("type").notNull(),
+    // Cadence user id; also the Novu subscriber id.
+    recipientUserId: integer("recipient_user_id")
+      .notNull()
+      .references(() => users.id),
+    // JSON object of the facts the workflow template needs.
+    payload: text("payload").notNull(),
+    status: text("status")
+      .notNull()
+      .$type<OutboxStatus>()
+      .default(OutboxStatus.Pending),
+    attempts: integer("attempts").notNull().default(0),
+    // The row is not retried before this time (ISO string).
+    nextAttemptAt: text("next_attempt_at").notNull(),
+    lastError: text("last_error"),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    sentAt: text("sent_at"),
+  },
+  (table) => [
+    index("notification_outbox_status_idx").on(
+      table.status,
+      table.nextAttemptAt
+    ),
+  ]
+);

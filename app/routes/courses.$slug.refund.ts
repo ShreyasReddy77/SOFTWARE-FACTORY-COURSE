@@ -8,6 +8,11 @@ import { eq } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
 import { raiseRefundRequest } from "~/lib/refunds.server";
 import { sendEmail } from "~/lib/mailer.server";
+import {
+  drainOutbox,
+  notificationsEnabled,
+  notify,
+} from "~/lib/notifications.server";
 
 const refundParamsSchema = z.object({
   slug: z.string().min(1),
@@ -60,19 +65,35 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data("Purchase not found.", { status: 404 });
   }
 
-  const result = raiseRefundRequest(
-    db,
-    purchase.id,
-    currentUserId,
-    parsed.data.reason,
-    new Date()
-  );
+  // The outbox rows commit with the Refund Request or not at all.
+  const result = db.transaction((tx) => {
+    const raised = raiseRefundRequest(
+      tx,
+      purchase.id,
+      currentUserId,
+      parsed.data.reason,
+      new Date()
+    );
+    if (raised.ok) {
+      notify(tx, {
+        type: "refund_requested",
+        refundRequestId: raised.refundRequestId,
+        actorUserId: currentUserId,
+      });
+    }
+    return raised;
+  });
 
   if (!result.ok) {
     throw data(result.error, { status: result.status });
   }
 
-  await sendEmail(result.email);
+  if (notificationsEnabled()) {
+    await drainOutbox(db);
+  } else {
+    // Until the flag is on, the old receipt email keeps going out.
+    await sendEmail(result.email);
+  }
 
   return redirect(result.kind === "team_licence" ? "/team" : "/settings");
 }

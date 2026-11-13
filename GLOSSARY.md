@@ -109,6 +109,14 @@ _Avoid_: Watch cap, Viewing threshold
 A message Cadence sends a person to tell them something that concerns them has happened.
 _Avoid_: Alert, Message, Activity
 
-**Notification Feed**:
-The place inside Cadence where a person sees their Notifications.
-_Avoid_: Inbox, Activity feed
+**Inbox**:
+The page inside Cadence where a person sees their Notifications, with read state and preferences. Replaces the earlier term Notification Feed.
+_Avoid_: Notification Feed, Activity feed
+
+**Transactional email**:
+Email a person cannot turn off, because it is a required message about their account or purchase (refunds, Enrollment, Seats).
+_Avoid_: System email, Service email
+
+**Activity mail**:
+Email about what is happening around a person's work or comments (an Instructor's new Enrollments, Discussion replies). A person can turn it off, per type.
+_Avoid_: Marketing email, Digest email
