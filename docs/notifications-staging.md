@@ -15,6 +15,10 @@ Everything below needs a human with dashboard access. None of it is done by the 
 - [ ] Create workflow `seat-claimed` (type 9, sent to the Team Admin when a Student claims a Seat): in-app step, then email step sent immediately. Copy must not mention the licence becoming unrefundable.
 - [ ] Verify in the Novu dev environment: enrol; leave the welcome unread and confirm the email goes after 1 h; repeat with the in-app item read and confirm the email is skipped.
 - [ ] Manual staging check: buy a course as an individual and claim a Seat; confirm the welcome (in-app now, email after 1 h if unread) and the Team Admin's seat-claimed (in-app and email immediately).
+- [ ] Create workflow `refund-approved` (sent to the buyer, or the Team Admin for a Team Licence): in-app step, then email step sent immediately.
+- [ ] Create workflow `refund-declined` (same recipient; shows the Platform Admin note in `decisionNote`): in-app step, then email step sent immediately.
+- [ ] Create workflow `enrollment-ended` (sent to the Student whose Individual Purchase was refunded; say their progress is kept): in-app step, then email step sent immediately.
+- [ ] Refund email parity check (cannot be done in code): approve and decline a refund in staging with the flag on and compare the Novu emails with the old Postmark ones. The old mailer module has already been deleted; with `NOTIFICATIONS_ENABLED` off, refund notifications wait unsent in the outbox and are delivered when the flag is turned on.
 - [ ] Ask Novu support to enable idempotency on the organisation. The key lifetime is undocumented; ask for it. Until enabled, the `Idempotency-Key` header is sent but may be ignored, and a retry after a lost response can duplicate.
 - [ ] Resolve the inbox retention conflict (30 days on the limits page vs 24 hours on the pricing page for Free) in the dashboard.
 - [ ] Manual staging check: request a refund as a buyer. Confirm the buyer's refund receipt and every admin's awaiting-review notification arrive in-app and by email. Check the outbox row ends `sent` and the Novu activity feed shows the run.
@@ -73,6 +77,9 @@ Both workflows receive:
 | `claimerName` | string | |
 
 A Claimed Seat sends both: `welcome` to the claimer and `seat-claimed` to each Team Admin of the licence's team.
+`refund-approved` and `refund-declined` receive the same fields plus `decisionNote` (string or null; the Platform Admin note, always set on a decline).
+
+`enrollment-ended` receives only `refundRequestId`, `courseId` and `courseTitle`.
 
 ## Error handling
 

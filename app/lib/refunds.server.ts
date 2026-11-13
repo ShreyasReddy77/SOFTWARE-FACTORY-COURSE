@@ -16,7 +16,6 @@ import {
   LessonProgressStatus,
   RefundStatus,
 } from "~/db/schema";
-import { formatPrice } from "~/lib/utils";
 import {
   REFUND_COMPLETION_LIMIT,
   REFUND_WATCH_LIMIT_SECONDS,
@@ -348,10 +347,8 @@ export function getRefundOffer(
   };
 }
 
-export type Email = { to: string; subject: string; body: string };
-
 export type RaiseResult =
-  | { ok: true; refundRequestId: number; kind: PurchaseKind; email: Email }
+  | { ok: true; refundRequestId: number; kind: PurchaseKind }
   | Failure;
 
 export function raiseRefundRequest(
@@ -391,20 +388,6 @@ export function raiseRefundRequest(
     ok: true,
     refundRequestId: refundRequest.id,
     kind: kindOf(getSeats(db, purchase.id)),
-    email: {
-      to: buyer.email,
-      subject: `Refund requested — ${course.title}`,
-      body: [
-        `Hi ${buyer.name},`,
-        "",
-        `We have your refund request for "${course.title}".`,
-        `The refund is for ${formatPrice(purchase.amountPaid)}, the amount you paid.`,
-        "",
-        "Our team reviews every refund request by hand. You do not need to do anything else — we will email you again when it is done.",
-        "",
-        "— The Cadence team",
-      ].join("\n"),
-    },
   };
 }
 
@@ -568,7 +551,10 @@ export function listTeamLicences(db: Queryable, buyerId: number, now: Date) {
 
 // ─── Deciding a Refund Request ───
 
-export type DecisionResult = { ok: true; email: Email } | Failure;
+/** `enrollmentEnded`: approval removed the buyer's Enrollment. */
+export type DecisionResult =
+  | { ok: true; enrollmentEnded: boolean }
+  | Failure;
 
 function findOpenRefundRequest(
   tx: Queryable,
@@ -624,6 +610,7 @@ export function approveRefundRequest(
 
     const { purchase } = found;
     const seats = getSeats(tx, purchase.id);
+    let enrollmentEnded = false;
 
     if (kindOf(seats) === "team_licence") {
       if (seats.some(isClaimed)) {
@@ -663,6 +650,7 @@ export function approveRefundRequest(
             )
           )
           .run();
+        enrollmentEnded = true;
       }
     }
 
@@ -677,10 +665,7 @@ export function approveRefundRequest(
       .where(eq(refunds.id, refundRequestId))
       .run();
 
-    return {
-      ok: true,
-      email: buildDecisionEmail(tx, purchase, RefundStatus.Approved, note),
-    };
+    return { ok: true, enrollmentEnded };
   });
 }
 
@@ -720,62 +705,6 @@ export function declineRefundRequest(
       .where(eq(refunds.id, refundRequestId))
       .run();
 
-    return {
-      ok: true,
-      email: buildDecisionEmail(
-        tx,
-        found.purchase,
-        RefundStatus.Declined,
-        trimmedNote
-      ),
-    };
+    return { ok: true, enrollmentEnded: false };
   });
-}
-
-/** The email the buyer gets once their Refund Request is decided. */
-function buildDecisionEmail(
-  db: Queryable,
-  purchase: Purchase,
-  decision: RefundStatus.Approved | RefundStatus.Declined,
-  note: string | null
-): Email {
-  const buyer = db
-    .select()
-    .from(users)
-    .where(eq(users.id, purchase.userId))
-    .get();
-  const course = db
-    .select()
-    .from(courses)
-    .where(eq(courses.id, purchase.courseId))
-    .get();
-
-  const courseTitle = course?.title ?? "your course";
-  const noteLines = note ? ["", note] : [];
-
-  const middle =
-    decision === RefundStatus.Approved
-      ? [
-          `We have approved your refund request for "${courseTitle}".`,
-          `${formatPrice(purchase.amountPaid)}, the full amount you paid, is on its way back to you.`,
-          ...noteLines,
-        ]
-      : [
-          `We have looked at your refund request for "${courseTitle}" and decided not to refund it.`,
-          ...noteLines,
-          "",
-          "You still have everything you bought. If something changes, you can raise a new refund request.",
-        ];
-
-  return {
-    to: buyer?.email ?? "",
-    subject: `Refund ${decision} — ${courseTitle}`,
-    body: [
-      `Hi ${buyer?.name ?? "there"},`,
-      "",
-      ...middle,
-      "",
-      "— The Cadence team",
-    ].join("\n"),
-  };
 }

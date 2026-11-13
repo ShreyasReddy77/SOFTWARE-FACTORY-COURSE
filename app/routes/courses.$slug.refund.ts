@@ -7,7 +7,6 @@ import { courses, purchases } from "~/db/schema";
 import { eq } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
 import { raiseRefundRequest } from "~/lib/refunds.server";
-import { sendEmail } from "~/lib/mailer.server";
 import {
   drainOutbox,
   notificationsEnabled,
@@ -88,11 +87,9 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data(result.error, { status: result.status });
   }
 
+  // With the flag off, rows wait unsent in the outbox.
   if (notificationsEnabled()) {
     await drainOutbox(db);
-  } else {
-    // Until the flag is on, the old receipt email keeps going out.
-    await sendEmail(result.email);
   }
 
   return redirect(result.kind === "team_licence" ? "/team" : "/settings");

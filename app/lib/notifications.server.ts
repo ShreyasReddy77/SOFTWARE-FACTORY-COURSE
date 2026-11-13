@@ -16,8 +16,20 @@ import {
   users,
   UserRole,
 } from "~/db/schema";
-import { sendEmail, type Email } from "~/lib/mailer.server";
 import { novuTransport } from "./novu-transport.server";
+
+/** An ops alert email. */
+export type Email = { to: string; subject: string; body: string };
+
+// The old mailer module is gone. Until a real ops-alert sender is chosen, the
+// default writes the alert to .outbox/ like the dev transport does.
+async function sendEmail(email: Email): Promise<void> {
+  mkdirSync(".outbox", { recursive: true });
+  writeFileSync(
+    join(".outbox", `${Date.now()}-alert-${email.to}.json`),
+    JSON.stringify(email, null, 2)
+  );
+}
 
 // ─── Notifications ───
 // The one module that owns every Notification type. Callers pass a fact about
@@ -33,7 +45,13 @@ type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 export type Queryable = Db | Tx;
 
 export type NotificationType =
-  "refund_requested" | "refund_awaiting_review" | "welcome" | "seat_claimed";
+  | "refund_requested"
+  | "refund_awaiting_review"
+  | "refund_approved"
+  | "refund_declined"
+  | "enrollment_ended"
+  | "welcome"
+  | "seat_claimed";
 
 /** What happened. `actorUserId` is the person who did it. */
 export type NotificationEvent =
@@ -42,6 +60,14 @@ export type NotificationEvent =
       refundRequestId: number;
       actorUserId: number;
     }
+  | {
+      type: "refund_approved";
+      refundRequestId: number;
+      actorUserId: number;
+      /** True when approval removed the buyer's Enrollment. */
+      enrollmentEnded: boolean;
+    }
+  | { type: "refund_declined"; refundRequestId: number; actorUserId: number }
   | {
       /** A new Enrollment (Individual Purchase or Claimed Seat). */
       type: "enrollment_created";
@@ -90,6 +116,10 @@ function resolveDeliveries(
       return welcome(db, event);
     case "seat_claimed":
       return seatClaimed(db, event);
+    case "refund_approved":
+      return refundApproved(db, event);
+    case "refund_declined":
+      return refundDeclined(db, event);
   }
 }
 
@@ -225,6 +255,84 @@ function seatClaimed(
   }));
 }
 
+function loadDecidedRefund(db: Queryable, refundRequestId: number) {
+  const row = db
+    .select({
+      refundRequestId: refunds.id,
+      purchaseId: purchases.id,
+      amountPaid: purchases.amountPaid,
+      decisionNote: refunds.decisionNote,
+      buyerId: purchases.userId,
+      courseId: courses.id,
+      courseTitle: courses.title,
+    })
+    .from(refunds)
+    .innerJoin(purchases, eq(purchases.id, refunds.purchaseId))
+    .innerJoin(courses, eq(courses.id, purchases.courseId))
+    .where(eq(refunds.id, refundRequestId))
+    .get();
+  if (!row) throw new Error(`Refund Request ${refundRequestId} not found`);
+
+  // A Team Licence is the Purchase that granted Seats.
+  const isTeamLicence =
+    db
+      .select({ id: coupons.id })
+      .from(coupons)
+      .where(eq(coupons.purchaseId, row.purchaseId))
+      .get() !== undefined;
+
+  const facts = {
+    refundRequestId: row.refundRequestId,
+    purchaseId: row.purchaseId,
+    courseId: row.courseId,
+    courseTitle: row.courseTitle,
+    amountPaid: row.amountPaid,
+    decisionNote: row.decisionNote,
+  };
+  return { row, facts, isTeamLicence };
+}
+
+// The buyer (the Team Admin for a Team Licence) hears the decision. Nobody is
+// told about their own action.
+function refundApproved(
+  db: Queryable,
+  event: Extract<NotificationEvent, { type: "refund_approved" }>
+): Delivery[] {
+  const { row, facts, isTeamLicence } = loadDecidedRefund(
+    db,
+    event.refundRequestId
+  );
+  if (row.buyerId === event.actorUserId) return [];
+
+  const deliveries: Delivery[] = [
+    { type: "refund_approved", recipientUserId: row.buyerId, payload: facts },
+  ];
+  // Only an Individual Purchase ends a Student's Enrollment.
+  if (!isTeamLicence && event.enrollmentEnded) {
+    deliveries.push({
+      type: "enrollment_ended",
+      recipientUserId: row.buyerId,
+      payload: {
+        refundRequestId: row.refundRequestId,
+        courseId: row.courseId,
+        courseTitle: row.courseTitle,
+      },
+    });
+  }
+  return deliveries;
+}
+
+function refundDeclined(
+  db: Queryable,
+  event: Extract<NotificationEvent, { type: "refund_declined" }>
+): Delivery[] {
+  const { row, facts } = loadDecidedRefund(db, event.refundRequestId);
+  if (row.buyerId === event.actorUserId) return [];
+  return [
+    { type: "refund_declined", recipientUserId: row.buyerId, payload: facts },
+  ];
+}
+
 // ─── Transport ───
 // The seam between the outbox and the outside world. Production will use Novu;
 // with no NOVU_SECRET_KEY the dev transport writes JSON to .outbox/.
@@ -286,7 +394,7 @@ export type DrainOptions = {
   now?: Date;
   /** Where alerts are emailed. Defaults to OPS_ALERT_EMAIL; unset means log only. */
   opsEmail?: string;
-  /** Defaults to the transactional mailer. */
+  /** Defaults to writing the alert to .outbox/. */
   sendAlert?: (email: Email) => Promise<void>;
 };
 

@@ -149,6 +149,116 @@ describe("notify: refund requested", () => {
   });
 });
 
+describe("notify: refund decisions", () => {
+  function makeTeamLicence() {
+    const team = db.insert(schema.teams).values({}).returning().get();
+    db.insert(schema.coupons)
+      .values({
+        teamId: team.id,
+        courseId: base.course.id,
+        code: "SEAT-1",
+        purchaseId: db.select().from(schema.purchases).get()!.id,
+      })
+      .run();
+  }
+
+  it("tells the buyer their refund was approved, and the Student their Enrollment ended", () => {
+    const admin = addUser("Pat", UserRole.Admin);
+
+    notify(db, {
+      type: "refund_approved",
+      refundRequestId: refundId,
+      actorUserId: admin.id,
+      enrollmentEnded: true,
+    });
+
+    expect(outbox().map((r) => [r.type, r.recipientUserId])).toEqual([
+      ["refund_approved", base.user.id],
+      ["enrollment_ended", base.user.id],
+    ]);
+    expect(outbox()[0].payload).toMatchObject({
+      refundRequestId: refundId,
+      courseTitle: "Test Course",
+      amountPaid: 4900,
+    });
+    expect(outbox()[1].payload).toMatchObject({
+      courseId: base.course.id,
+      courseTitle: "Test Course",
+    });
+  });
+
+  it("carries the Platform Admin note on an approval", () => {
+    const admin = addUser("Pat", UserRole.Admin);
+    db.update(schema.refunds)
+      .set({ decisionNote: "Sorry it did not fit." })
+      .run();
+
+    notify(db, {
+      type: "refund_approved",
+      refundRequestId: refundId,
+      actorUserId: admin.id,
+      enrollmentEnded: false,
+    });
+
+    expect(outbox()[0].payload).toMatchObject({
+      decisionNote: "Sorry it did not fit.",
+    });
+  });
+
+  it("sends only Refund approved when the Enrollment was kept", () => {
+    const admin = addUser("Pat", UserRole.Admin);
+
+    notify(db, {
+      type: "refund_approved",
+      refundRequestId: refundId,
+      actorUserId: admin.id,
+      enrollmentEnded: false,
+    });
+
+    expect(outbox().map((r) => r.type)).toEqual(["refund_approved"]);
+  });
+
+  it("notifies the Team Admin, not a Student, for a Team Licence approval", () => {
+    const admin = addUser("Pat", UserRole.Admin);
+    makeTeamLicence();
+
+    notify(db, {
+      type: "refund_approved",
+      refundRequestId: refundId,
+      actorUserId: admin.id,
+      enrollmentEnded: true,
+    });
+
+    expect(outbox().map((r) => [r.type, r.recipientUserId])).toEqual([
+      ["refund_approved", base.user.id],
+    ]);
+  });
+
+  it("includes the Platform Admin note when a refund is declined", () => {
+    const admin = addUser("Pat", UserRole.Admin);
+    db.update(schema.refunds)
+      .set({ decisionNote: "You finished the course." })
+      .run();
+
+    notify(db, {
+      type: "refund_declined",
+      refundRequestId: refundId,
+      actorUserId: admin.id,
+    });
+
+    expect(outbox()).toHaveLength(1);
+    expect(outbox()[0]).toMatchObject({
+      type: "refund_declined",
+      recipientUserId: base.user.id,
+      payload: {
+        refundRequestId: refundId,
+        courseTitle: "Test Course",
+        decisionNote: "You finished the course.",
+      },
+    });
+  });
+});
+
 describe("drainOutbox", () => {
   const NOW = new Date("2026-10-06T12:00:00.000Z");
 

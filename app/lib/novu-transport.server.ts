@@ -21,6 +21,9 @@ const WORKFLOW_IDS: Record<NotificationType, string> = {
   refund_awaiting_review: "refund-awaiting-review",
   welcome: "welcome",
   seat_claimed: "seat-claimed",
+  refund_approved: "refund-approved",
+  refund_declined: "refund-declined",
+  enrollment_ended: "enrollment-ended",
 };
 
 export type NovuTransportOptions = {
