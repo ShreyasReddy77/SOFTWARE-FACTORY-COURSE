@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { and, asc, eq, lte } from "drizzle-orm";
+import { and, asc, eq, lt, lte } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
 import {
@@ -12,6 +12,7 @@ import {
   users,
   UserRole,
 } from "~/db/schema";
+import { sendEmail, type Email } from "~/lib/mailer.server";
 
 // ─── Notifications ───
 // The one module that owns every Notification type. Callers pass a fact about
@@ -169,12 +170,19 @@ const BACKOFF_MS = [
   60_000, 300_000, 1_800_000, 7_200_000, 21_600_000, 86_400_000,
 ];
 const BATCH_SIZE = 20;
+const STALE_AFTER_MS = 15 * 60_000;
+// Sent rows hold copies of personal data (ADR 0014), so they are pruned.
+const SENT_RETENTION_MS = 7 * 86_400_000;
 
 export type DrainOptions = {
   /** Defaults to the NOTIFICATIONS_ENABLED environment flag. */
   enabled?: boolean;
   transport?: Transport;
   now?: Date;
+  /** Where alerts are emailed. Defaults to OPS_ALERT_EMAIL; unset means log only. */
+  opsEmail?: string;
+  /** Defaults to the transactional mailer. */
+  sendAlert?: (email: Email) => Promise<void>;
 };
 
 type OutboxRow = typeof notificationOutbox.$inferSelect;
@@ -189,6 +197,8 @@ export async function drainOutbox(db: Db, options: DrainOptions = {}) {
 
   const transport = options.transport ?? defaultTransport();
   const now = options.now ?? new Date();
+
+  const deadIds: number[] = [];
 
   const due = db
     .select()
@@ -235,9 +245,120 @@ export async function drainOutbox(db: Db, options: DrainOptions = {}) {
         .run();
       logAttempt(row, attempt, "sent", started);
     } catch (error) {
-      logAttempt(row, attempt, recordFailure(db, row, attempt, error, now), started);
+      const outcome = recordFailure(db, row, attempt, error, now);
+      logAttempt(row, attempt, outcome, started);
+      if (outcome === "dead") deadIds.push(row.id);
     }
   }
+
+  const target: AlertTarget = {
+    opsEmail: options.opsEmail ?? process.env.OPS_ALERT_EMAIL,
+    sendAlert: options.sendAlert ?? ((email) => sendEmail(email)),
+  };
+  for (const id of deadIds) {
+    await raiseAlert(target, "dead", {
+      outboxId: id,
+      subject: `Notification ${id} is dead`,
+      body: `Outbox row ${id} failed permanently and was kept for replay (npm run replay-dead-notifications).`,
+    });
+  }
+  await alertOnStaleRow(db, target, now);
+  pruneSentRows(db, now);
+}
+
+type AlertTarget = {
+  opsEmail: string | undefined;
+  sendAlert: (email: Email) => Promise<void>;
+};
+
+let lastStaleAlertAt = 0;
+
+/** Test hook: forget when the stale-row alert last fired. */
+export function resetAlertThrottle() {
+  lastStaleAlertAt = 0;
+}
+
+async function alertOnStaleRow(db: Db, target: AlertTarget, now: Date) {
+  const oldest = db
+    .select()
+    .from(notificationOutbox)
+    .where(eq(notificationOutbox.status, OutboxStatus.Pending))
+    .orderBy(asc(notificationOutbox.createdAt))
+    .limit(1)
+    .get();
+  if (!oldest) return;
+  const ageMs = now.getTime() - Date.parse(oldest.createdAt);
+  if (ageMs <= STALE_AFTER_MS) return;
+  // One alert per window, not one per drain.
+  if (now.getTime() - lastStaleAlertAt < STALE_AFTER_MS) return;
+  lastStaleAlertAt = now.getTime();
+
+  const minutes = Math.floor(ageMs / 60_000);
+  await raiseAlert(target, "stale", {
+    outboxId: oldest.id,
+    subject: `Notifications are stuck: oldest unsent is ${minutes} min old`,
+    body: `Outbox row ${oldest.id} has been unsent for ${minutes} minutes.`,
+  });
+}
+
+async function raiseAlert(
+  target: AlertTarget,
+  reason: "dead" | "stale",
+  alert: { outboxId: number; subject: string; body: string }
+) {
+  console.log(
+    JSON.stringify({
+      event: "notification_alert",
+      reason,
+      outboxId: alert.outboxId,
+    })
+  );
+  if (!target.opsEmail) return;
+  try {
+    await target.sendAlert({
+      to: target.opsEmail,
+      subject: alert.subject,
+      body: alert.body,
+    });
+  } catch (error) {
+    // A broken alert channel must not stop deliveries.
+    console.log(
+      JSON.stringify({
+        event: "notification_alert_failed",
+        reason,
+        outboxId: alert.outboxId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    );
+  }
+}
+
+/** Deletes sent rows older than the retention window. Returns how many. */
+export function pruneSentRows(db: Queryable, now = new Date()) {
+  const cutoff = new Date(now.getTime() - SENT_RETENTION_MS).toISOString();
+  return db
+    .delete(notificationOutbox)
+    .where(
+      and(
+        eq(notificationOutbox.status, OutboxStatus.Sent),
+        lt(notificationOutbox.sentAt, cutoff)
+      )
+    )
+    .run().changes;
+}
+
+/** Puts every dead row back in the queue as new. Returns how many. */
+export function replayDeadRows(db: Queryable, now = new Date()) {
+  return db
+    .update(notificationOutbox)
+    .set({
+      status: OutboxStatus.Pending,
+      attempts: 0,
+      nextAttemptAt: now.toISOString(),
+      lastError: null,
+    })
+    .where(eq(notificationOutbox.status, OutboxStatus.Dead))
+    .run().changes;
 }
 
 function recordFailure(
