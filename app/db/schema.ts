@@ -32,7 +32,7 @@ export enum QuestionType {
 }
 
 export enum RefundStatus {
-  Requested = "requested",
+  Open = "open",
   Approved = "approved",
   Declined = "declined",
 }
@@ -239,8 +239,8 @@ export const refunds = sqliteTable(
     status: text("status")
       .notNull()
       .$type<RefundStatus>()
-      .default(RefundStatus.Requested),
-    // The learner's own words, in the box on the course page.
+      .default(RefundStatus.Open),
+    // The student's own words, in the box on the course page.
     reason: text("reason").notNull(),
     // Null until someone approves — a declined request refunds nothing.
     amountRefunded: integer("amount_refunded"),
@@ -249,6 +249,9 @@ export const refunds = sqliteTable(
       .$defaultFn(() => new Date().toISOString()),
     resolvedAt: text("resolved_at"),
     resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
+    // The Platform Admin's note to the buyer. Required on a decline, optional
+    // on an approval. Enforced on write.
+    decisionNote: text("decision_note"),
   },
   (table) => [index("refunds_purchase_idx").on(table.purchaseId)]
 );
@@ -288,6 +291,9 @@ export const coupons = sqliteTable("coupons", {
     .references(() => purchases.id),
   redeemedByUserId: integer("redeemed_by_user_id").references(() => users.id),
   redeemedAt: text("redeemed_at"),
+  // Set on every Unclaimed Seat when its Team Licence's Refund Request is
+  // approved. The Seat can never be claimed after that.
+  refundedAt: text("refunded_at"),
   createdAt: text("created_at")
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
@@ -368,3 +374,45 @@ export const videoWatchEvents = sqliteTable("video_watch_events", {
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
 });
+
+export enum OutboxStatus {
+  Pending = "pending",
+  Sent = "sent",
+  Dead = "dead",
+}
+
+// Notifications waiting to be handed to the transport. A row is written in the
+// same transaction as the domain change that caused it. See ADR 0014.
+export const notificationOutbox = sqliteTable(
+  "notification_outbox",
+  {
+    // Doubles as the Idempotency-Key sent with every delivery attempt.
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    // A NotificationType, e.g. "refund_requested".
+    type: text("type").notNull(),
+    // Cadence user id; also the Novu subscriber id.
+    recipientUserId: integer("recipient_user_id")
+      .notNull()
+      .references(() => users.id),
+    // JSON object of the facts the workflow template needs.
+    payload: text("payload").notNull(),
+    status: text("status")
+      .notNull()
+      .$type<OutboxStatus>()
+      .default(OutboxStatus.Pending),
+    attempts: integer("attempts").notNull().default(0),
+    // The row is not retried before this time (ISO string).
+    nextAttemptAt: text("next_attempt_at").notNull(),
+    lastError: text("last_error"),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    sentAt: text("sent_at"),
+  },
+  (table) => [
+    index("notification_outbox_status_idx").on(
+      table.status,
+      table.nextAttemptAt
+    ),
+  ]
+);

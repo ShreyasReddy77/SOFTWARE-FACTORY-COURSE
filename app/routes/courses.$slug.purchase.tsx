@@ -23,6 +23,7 @@ import { eq, and, or, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
+import { EmailNotice } from "~/components/email-notice";
 import {
   Tabs,
   TabsList,
@@ -38,6 +39,7 @@ import { formatDuration, formatPrice } from "~/lib/utils";
 import { resolveCountry } from "~/lib/country.server";
 import { calculatePppPrice, getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
 import { parseFormData, parseParams } from "~/lib/validation";
+import { notify, type Queryable } from "~/lib/notifications.server";
 
 function getCourseBySlug(slug: string) {
   return db.select().from(courses).where(eq(courses.slug, slug)).get();
@@ -143,18 +145,24 @@ function getEnrollmentCountForCourse(courseId: number) {
 }
 
 function enrollUser(
+  tx: Queryable,
   userId: number,
   courseId: number,
-  sendEmail: boolean,
   skipValidation: boolean
 ) {
   if (!skipValidation) {
-    const existing = findEnrollment(userId, courseId);
+    const existing = tx
+      .select()
+      .from(enrollments)
+      .where(
+        and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId))
+      )
+      .get();
     if (existing) {
       throw new Error("User is already enrolled in this course");
     }
 
-    const course = db
+    const course = tx
       .select()
       .from(courses)
       .where(eq(courses.id, courseId))
@@ -164,15 +172,11 @@ function enrollUser(
     }
   }
 
-  const enrollment = db
+  const enrollment = tx
     .insert(enrollments)
     .values({ userId, courseId })
     .returning()
     .get();
-
-  if (sendEmail) {
-    // Would send welcome email here
-  }
 
   return enrollment;
 }
@@ -181,9 +185,10 @@ function createPurchase(
   userId: number,
   courseId: number,
   amountPaid: number,
-  country: string | null
+  country: string | null,
+  tx: Queryable = db
 ) {
-  return db
+  return tx
     .insert(purchases)
     .values({ userId, courseId, amountPaid, country })
     .returning()
@@ -367,8 +372,11 @@ export async function action({ params, request }: Route.ActionArgs) {
     if (isUserEnrolled(currentUserId, course.id)) {
       throw redirect(`/courses/${slug}`);
     }
-    createPurchase(currentUserId, course.id, pppPrice, country);
-    enrollUser(currentUserId, course.id, false, false);
+    db.transaction((tx) => {
+      createPurchase(currentUserId, course.id, pppPrice, country, tx);
+      const enrollment = enrollUser(tx, currentUserId, course.id, false);
+      notify(tx, { type: "enrollment_created", enrollmentId: enrollment.id });
+    });
     throw redirect(`/courses/${slug}/welcome`);
   }
 
@@ -616,6 +624,7 @@ export default function PurchaseConfirmation({
                 </TabsContent>
               </TabsContentNoShift>
             </Tabs>
+            <EmailNotice className="mt-4 text-xs text-muted-foreground" />
           </div>
         </CardContent>
       </Card>

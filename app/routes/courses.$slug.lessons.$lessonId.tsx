@@ -55,6 +55,7 @@ import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
 import { COUNTRIES } from "~/lib/ppp";
 import { parseFormData, parseParams } from "~/lib/validation";
+import { notify } from "~/lib/notifications.server";
 
 const lessonParamsSchema = z.object({
   slug: z.string().min(1),
@@ -427,11 +428,16 @@ function createComment(
     }
   }
 
-  return db
-    .insert(comments)
-    .values({ userId, lessonId, parentId, body: trimmed })
-    .returning()
-    .get();
+  // The notification rows commit or roll back with the comment.
+  return db.transaction((tx) => {
+    const created = tx
+      .insert(comments)
+      .values({ userId, lessonId, parentId, body: trimmed })
+      .returning()
+      .get();
+    notify(tx, { type: "comment_created", commentId: created.id });
+    return created;
+  });
 }
 
 function updateComment(commentId: number, userId: number, body: string) {

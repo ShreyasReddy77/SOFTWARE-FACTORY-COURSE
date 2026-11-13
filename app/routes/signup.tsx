@@ -8,6 +8,7 @@ import { parseFormData } from "~/lib/validation";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
+import { EmailNotice } from "~/components/email-notice";
 import { db } from "~/db";
 import { eq } from "drizzle-orm";
 
@@ -159,6 +160,7 @@ export default function SignUp() {
               >
                 {isSubmitting ? "Creating account..." : "Sign Up"}
               </Button>
+              <EmailNotice className="text-xs text-muted-foreground" />
             </Form>
           </CardContent>
         </Card>
