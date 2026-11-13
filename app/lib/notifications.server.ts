@@ -13,8 +13,20 @@ import {
   users,
   UserRole,
 } from "~/db/schema";
-import { sendEmail, type Email } from "~/lib/mailer.server";
 import { novuTransport } from "./novu-transport.server";
+
+/** An ops alert email. */
+export type Email = { to: string; subject: string; body: string };
+
+// The old mailer module is gone. Until a real ops-alert sender is chosen, the
+// default writes the alert to .outbox/ like the dev transport does.
+async function sendEmail(email: Email): Promise<void> {
+  mkdirSync(".outbox", { recursive: true });
+  writeFileSync(
+    join(".outbox", `${Date.now()}-alert-${email.to}.json`),
+    JSON.stringify(email, null, 2)
+  );
+}
 
 // ─── Notifications ───
 // The one module that owns every Notification type. Callers pass a fact about
@@ -279,7 +291,7 @@ export type DrainOptions = {
   now?: Date;
   /** Where alerts are emailed. Defaults to OPS_ALERT_EMAIL; unset means log only. */
   opsEmail?: string;
-  /** Defaults to the transactional mailer. */
+  /** Defaults to writing the alert to .outbox/. */
   sendAlert?: (email: Email) => Promise<void>;
 };
 
