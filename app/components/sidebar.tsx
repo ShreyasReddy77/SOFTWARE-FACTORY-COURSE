@@ -3,7 +3,9 @@ import { useState, useEffect } from "react";
 import { cn } from "~/lib/utils";
 import { UserRole } from "~/db/schema";
 import { UserAvatar } from "~/components/user-avatar";
+import { InboxBadge } from "~/components/inbox-badge";
 import {
+  Bell,
   BookOpen,
   ChartColumn,
   LayoutDashboard,
@@ -41,6 +43,8 @@ interface SidebarProps {
   currentUser: CurrentUser | null;
   recentCourses?: RecentCourse[];
   isTeamAdmin?: boolean;
+  /** True when the app is wrapped in a NovuProvider, so the badge can read counts. */
+  showUnreadBadge?: boolean;
 }
 
 interface NavItem {
@@ -117,6 +121,7 @@ export function Sidebar({
   currentUser,
   recentCourses = [],
   isTeamAdmin = false,
+  showUnreadBadge = false,
 }: SidebarProps) {
   const currentUserRole = currentUser?.role ?? null;
   const [isDark, setIsDark] = useState(false);
@@ -162,6 +167,23 @@ export function Sidebar({
               {item.label}
             </NavLink>
           ))}
+        {currentUser && (
+          <NavLink
+            to="/inbox"
+            className={({ isActive }) =>
+              cn(
+                "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                isActive
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+              )
+            }
+          >
+            <Bell className="size-4" />
+            Inbox
+            {showUnreadBadge && <InboxBadge />}
+          </NavLink>
+        )}
         {isTeamAdmin && (
           <NavLink
             to="/team"
