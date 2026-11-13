@@ -1,5 +1,20 @@
 import { describe, it, expect } from "vitest";
-import { groupByDay, notificationKind, PREFERENCE_TYPES } from "./inbox";
+import {
+  digestEventCount,
+  groupByDay,
+  notificationKind,
+  PREFERENCE_TYPES,
+} from "./inbox";
+
+describe("digestEventCount", () => {
+  it("reads the eventCount field the Novu in-app step sets", () => {
+    expect(digestEventCount({ eventCount: 4 })).toBe(4);
+  });
+  it("is 0 when absent or not a number", () => {
+    expect(digestEventCount(undefined)).toBe(0);
+    expect(digestEventCount({ eventCount: "4" })).toBe(0);
+  });
+});
 
 describe("groupByDay", () => {
   const now = new Date(2026, 2, 10, 15, 0, 0);

@@ -81,6 +81,41 @@ A Claimed Seat sends both: `welcome` to the claimer and `seat-claimed` to each T
 
 `enrollment-ended` receives only `refundRequestId`, `courseId` and `courseTitle`.
 
+## Activity workflows (types 10-13, ticket 24)
+
+Activity payloads always include `courseId` and `unsubscribeUrl` (built by `buildUnsubscribeUrl` in `app/lib/unsubscribe.server.ts`: `<APP_BASE_URL>/unsubscribe/<signed token>`; null if `NOTIFICATIONS_UNSUBSCRIBE_SECRET` is unset). Set `APP_BASE_URL` to the public site origin (default `http://localhost:5173`). The actor is never a recipient.
+
+Workflow ids must be exactly as below (the Inbox Preferences rows and `ACTIVITY_WORKFLOW_IDS` use them).
+
+### Instructor workflows: `new-enrollment`, `new-comment`, `new-rating`
+
+Recipient: the course's Instructor. Steps:
+
+1. **In-app step**, one item per event (not digested). Set the step's data so the Inbox can show the digest line: `eventCount` = the digest step's `eventCount` (Novu `{{step.digest.eventCount}}`, i.e. the number of events in the window). The Inbox reads exactly this field (`DIGEST_EVENT_COUNT_FIELD` in `app/lib/inbox.ts`) and shows "Grouped · N events in the last hour" when it is greater than 1. Rows without it are single events.
+2. **Digest step**: window **1 hour**, digest key `payload.courseId`, so one digest per Instructor (subscriber) and course.
+3. **Email step** after the digest, **always sent** (no read-skip: Novu does not document one after a digest).
+
+| Type | Workflow id | Payload (besides `courseId`, `courseTitle`, `unsubscribeUrl`) |
+| --- | --- | --- |
+| 10 | `new-enrollment` | `enrollmentId`, `courseUrl`, `studentName` |
+| 11 | `new-comment` | `commentId`, `lessonId`, `lessonUrl`, `commenterName` |
+| 13 | `new-rating` | `ratingId`, `rating` (1-5), `courseUrl` |
+
+An update to an existing rating does not notify; only a first rating does. URLs are relative paths; prefix with the site origin in the template.
+
+### Reply workflow: `comment-reply` (type 12)
+
+Recipient: the author of the parent comment (never the replier). Steps: **in-app step**, then **Delay 1 hour**, then **email step with a step condition: skip if the in-app message is read**. No digest. Payload (besides `courseId`, `courseTitle`, `unsubscribeUrl`): `commentId`, `parentCommentId`, `lessonId`, `lessonUrl`, `replierName`.
+
+### Checklist (NOT done by the code change)
+
+- [ ] Create the four workflows above in the Novu dev environment with the exact ids.
+- [ ] Configure the in-app `eventCount` data field on the three Instructor workflows.
+- [ ] Set `APP_BASE_URL` and `NOTIFICATIONS_UNSUBSCRIBE_SECRET` in staging.
+- [ ] Manual staging check, digest window: create several Enrollments/comments/ratings on one course within an hour; confirm one in-app item per event, a single digest email per Instructor and course after the window, and the "Grouped · N events in the last hour" line.
+- [ ] Manual staging check, delay-then-skip: reply to a comment; leave it unread and confirm the email after 1 h; repeat with the in-app item read and confirm the email is skipped.
+- [ ] Confirm the Activity mail toggle in Preferences stops the email for each type.
+
 ## Error handling
 
 2xx marks the row sent. 429 retries honouring `Retry-After` (seconds). Other 4xx marks the row dead. 5xx and network failures retry on the backoff schedule (1 min, 5 min, 30 min, 2 h, 6 h, 24 h, then dead).
@@ -109,7 +144,7 @@ Footers, headers and templates live in Novu. None of this checklist is done by t
 
 - [ ] Same accurate `From` / `Reply-To`.
 - [ ] "Why you got this" line, e.g. `You got this because you teach <course> on Cadence.` (adapt per type: enrolment, comment, reply, rating).
-- [ ] One-click unsubscribe link -> `<site origin>/unsubscribe/<token>` using `payload.unsubscribeUrl`. The token is made with `signUnsubscribeToken(secret, userId, activityType)` in `app/lib/unsubscribe.server.ts`. The Activity types (10-13) are not shipped yet; when they are, `notify()` must add `unsubscribeUrl` to their payloads.
+- [ ] One-click unsubscribe link -> `<site origin>/unsubscribe/<token>` using `payload.unsubscribeUrl`. The token is made with `signUnsubscribeToken(secret, userId, activityType)` in `app/lib/unsubscribe.server.ts`. `notify()` adds `unsubscribeUrl` to every Activity payload.
 - [ ] Headers on the email step (Novu email step custom headers, if the plan supports them; otherwise ask Novu/Postmark support): `List-Unsubscribe: <https://<site origin>/unsubscribe/<token>>` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`. The route accepts the POST without login.
 - [ ] Footer link: `Preferences` -> `<site origin>/inbox`; `Privacy notice` -> `<site origin>/privacy`.
 - [ ] Physical address (the `NOTIFICATIONS_POSTAL_ADDRESS` value) in the footer.

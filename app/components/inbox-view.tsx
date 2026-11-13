@@ -12,6 +12,7 @@ import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
 import {
+  digestEventCount,
   groupByDay,
   notificationKind,
   PREFERENCE_TYPES,
@@ -26,8 +27,7 @@ const kindDot: Record<NotificationKind, string> = {
 };
 
 function eventCount(notification: Notification): number {
-  const value = notification.data?.eventCount;
-  return typeof value === "number" ? value : 0;
+  return digestEventCount(notification.data);
 }
 
 function NotificationRow({ notification }: { notification: Notification }) {

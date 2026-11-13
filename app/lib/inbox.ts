@@ -2,6 +2,19 @@
 
 export type NotificationKind = "money" | "access" | "activity";
 
+/**
+ * The Notification `data` field that carries a digest row's event count. The
+ * Novu in-app step of each Instructor workflow sets it from the digest step's
+ * eventCount (see docs/notifications-staging.md). Rows without it are single
+ * events.
+ */
+export const DIGEST_EVENT_COUNT_FIELD = "eventCount";
+
+export function digestEventCount(data: Record<string, unknown> | undefined) {
+  const value = data?.[DIGEST_EVENT_COUNT_FIELD];
+  return typeof value === "number" ? value : 0;
+}
+
 const KINDS: readonly NotificationKind[] = ["money", "access", "activity"];
 
 /** Money amber, access blue, activity grey. A workflow tag wins over the id. */
