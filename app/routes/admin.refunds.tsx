@@ -21,7 +21,11 @@ import {
   type RefundRequestForReview,
 } from "~/lib/refunds.server";
 import { RULE_BREAK_LABELS } from "~/lib/refund-rules";
-import { sendEmail } from "~/lib/mailer.server";
+import {
+  drainOutbox,
+  notificationsEnabled,
+  notify,
+} from "~/lib/notifications.server";
 
 const refundFilterSchema = z
   .nativeEnum(RefundStatus)
@@ -106,28 +110,52 @@ export async function action({ request }: Route.ActionArgs) {
 
   const { intent, refundRequestId, note } = parsed.data;
 
-  const result =
-    intent === "approve"
-      ? approveRefundRequest(
-          db,
+  // The outbox rows commit with the decision or not at all.
+  const result = db.transaction((tx) => {
+    if (intent === "approve") {
+      const approved = approveRefundRequest(
+        tx,
+        refundRequestId,
+        platformAdmin.id,
+        note || null,
+        new Date()
+      );
+      if (approved.ok) {
+        notify(tx, {
+          type: "refund_approved",
           refundRequestId,
-          platformAdmin.id,
-          note || null,
-          new Date()
-        )
-      : declineRefundRequest(
-          db,
-          refundRequestId,
-          platformAdmin.id,
-          note,
-          new Date()
-        );
+          actorUserId: platformAdmin.id,
+          enrollmentEnded: approved.enrollmentEnded,
+        });
+      }
+      return approved;
+    }
+
+    const declined = declineRefundRequest(
+      tx,
+      refundRequestId,
+      platformAdmin.id,
+      note,
+      new Date()
+    );
+    if (declined.ok) {
+      notify(tx, {
+        type: "refund_declined",
+        refundRequestId,
+        actorUserId: platformAdmin.id,
+      });
+    }
+    return declined;
+  });
 
   if (!result.ok) {
     return data({ error: result.error }, { status: result.status });
   }
 
-  await sendEmail(result.email);
+  // With the flag off, rows wait unsent in the outbox.
+  if (notificationsEnabled()) {
+    await drainOutbox(db);
+  }
 
   return {
     success: true,

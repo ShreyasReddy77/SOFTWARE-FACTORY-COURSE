@@ -4,6 +4,7 @@ import { and, asc, eq, lte } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
 import {
+  coupons,
   courses,
   notificationOutbox,
   OutboxStatus,
@@ -27,14 +28,28 @@ type Db = BetterSQLite3Database<typeof schema>;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 export type Queryable = Db | Tx;
 
-export type NotificationType = "refund_requested" | "refund_awaiting_review";
+export type NotificationType =
+  | "refund_requested"
+  | "refund_awaiting_review"
+  | "refund_approved"
+  | "refund_declined"
+  | "enrollment_ended";
 
 /** What happened. `actorUserId` is the person who did it. */
-export type NotificationEvent = {
-  type: "refund_requested";
-  refundRequestId: number;
-  actorUserId: number;
-};
+export type NotificationEvent =
+  | {
+      type: "refund_requested";
+      refundRequestId: number;
+      actorUserId: number;
+    }
+  | {
+      type: "refund_approved";
+      refundRequestId: number;
+      actorUserId: number;
+      /** True when approval removed the buyer's Enrollment. */
+      enrollmentEnded: boolean;
+    }
+  | { type: "refund_declined"; refundRequestId: number; actorUserId: number };
 
 export function notify(db: Queryable, event: NotificationEvent, now = new Date()) {
   const deliveries = resolveDeliveries(db, event);
@@ -62,6 +77,10 @@ function resolveDeliveries(db: Queryable, event: NotificationEvent): Delivery[] 
   switch (event.type) {
     case "refund_requested":
       return refundRequested(db, event);
+    case "refund_approved":
+      return refundApproved(db, event);
+    case "refund_declined":
+      return refundDeclined(db, event);
   }
 }
 
@@ -118,6 +137,84 @@ function refundRequested(
   }
 
   return deliveries;
+}
+
+function loadDecidedRefund(db: Queryable, refundRequestId: number) {
+  const row = db
+    .select({
+      refundRequestId: refunds.id,
+      purchaseId: purchases.id,
+      amountPaid: purchases.amountPaid,
+      decisionNote: refunds.decisionNote,
+      buyerId: purchases.userId,
+      courseId: courses.id,
+      courseTitle: courses.title,
+    })
+    .from(refunds)
+    .innerJoin(purchases, eq(purchases.id, refunds.purchaseId))
+    .innerJoin(courses, eq(courses.id, purchases.courseId))
+    .where(eq(refunds.id, refundRequestId))
+    .get();
+  if (!row) throw new Error(`Refund Request ${refundRequestId} not found`);
+
+  // A Team Licence is the Purchase that granted Seats.
+  const isTeamLicence =
+    db
+      .select({ id: coupons.id })
+      .from(coupons)
+      .where(eq(coupons.purchaseId, row.purchaseId))
+      .get() !== undefined;
+
+  const facts = {
+    refundRequestId: row.refundRequestId,
+    purchaseId: row.purchaseId,
+    courseId: row.courseId,
+    courseTitle: row.courseTitle,
+    amountPaid: row.amountPaid,
+    decisionNote: row.decisionNote,
+  };
+  return { row, facts, isTeamLicence };
+}
+
+// The buyer (the Team Admin for a Team Licence) hears the decision. Nobody is
+// told about their own action.
+function refundApproved(
+  db: Queryable,
+  event: Extract<NotificationEvent, { type: "refund_approved" }>
+): Delivery[] {
+  const { row, facts, isTeamLicence } = loadDecidedRefund(
+    db,
+    event.refundRequestId
+  );
+  if (row.buyerId === event.actorUserId) return [];
+
+  const deliveries: Delivery[] = [
+    { type: "refund_approved", recipientUserId: row.buyerId, payload: facts },
+  ];
+  // Only an Individual Purchase ends a Student's Enrollment.
+  if (!isTeamLicence && event.enrollmentEnded) {
+    deliveries.push({
+      type: "enrollment_ended",
+      recipientUserId: row.buyerId,
+      payload: {
+        refundRequestId: row.refundRequestId,
+        courseId: row.courseId,
+        courseTitle: row.courseTitle,
+      },
+    });
+  }
+  return deliveries;
+}
+
+function refundDeclined(
+  db: Queryable,
+  event: Extract<NotificationEvent, { type: "refund_declined" }>
+): Delivery[] {
+  const { row, facts } = loadDecidedRefund(db, event.refundRequestId);
+  if (row.buyerId === event.actorUserId) return [];
+  return [
+    { type: "refund_declined", recipientUserId: row.buyerId, payload: facts },
+  ];
 }
 
 // ─── Transport ───

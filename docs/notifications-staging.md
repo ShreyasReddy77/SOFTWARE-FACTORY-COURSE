@@ -11,6 +11,10 @@ Everything below needs a human with dashboard access. None of it is done by the 
 - [ ] Configure **Postmark** as the email integration inside Novu (server token, verified sender signature/domain). Templates live in Novu, not in the repo.
 - [ ] Create workflow `refund-requested` (the Refund receipt, sent to the buyer): in-app step, then email step sent immediately (Transactional, cannot be muted).
 - [ ] Create workflow `refund-awaiting-review` (sent to each Platform Admin): in-app step, then email step sent immediately.
+- [ ] Create workflow `refund-approved` (sent to the buyer, or the Team Admin for a Team Licence): in-app step, then email step sent immediately.
+- [ ] Create workflow `refund-declined` (same recipient; shows the Platform Admin note in `decisionNote`): in-app step, then email step sent immediately.
+- [ ] Create workflow `enrollment-ended` (sent to the Student whose Individual Purchase was refunded; say their progress is kept): in-app step, then email step sent immediately.
+- [ ] Refund email parity check (cannot be done in code): approve and decline a refund in staging with the flag on and compare the Novu emails with the old Postmark ones. The old mailer module has already been deleted; with `NOTIFICATIONS_ENABLED` off, refund notifications wait unsent in the outbox and are delivered when the flag is turned on.
 - [ ] Ask Novu support to enable idempotency on the organisation. The key lifetime is undocumented; ask for it. Until enabled, the `Idempotency-Key` header is sent but may be ignored, and a retry after a lost response can duplicate.
 - [ ] Resolve the inbox retention conflict (30 days on the limits page vs 24 hours on the pricing page for Free) in the dashboard.
 - [ ] Manual staging check: request a refund as a buyer. Confirm the buyer's refund receipt and every admin's awaiting-review notification arrive in-app and by email. Check the outbox row ends `sent` and the Novu activity feed shows the run.
@@ -49,6 +53,10 @@ Both workflows receive:
 | `amountPaid` | number | Integer cents (ADR 0005); format in the template |
 
 `refund-awaiting-review` also receives `buyerName` (string).
+
+`refund-approved` and `refund-declined` receive the same fields plus `decisionNote` (string or null; the Platform Admin note, always set on a decline).
+
+`enrollment-ended` receives only `refundRequestId`, `courseId` and `courseTitle`.
 
 ## Error handling
 

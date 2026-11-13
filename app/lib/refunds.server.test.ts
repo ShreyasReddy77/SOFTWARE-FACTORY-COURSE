@@ -356,16 +356,13 @@ describe("approving a Refund Request", () => {
     });
   });
 
-  it("emails the buyer that the refund is on its way", () => {
+  it("reports that an Individual Purchase's Enrollment ended", () => {
     const purchase = buyForSelf(base.user.id);
     const id = raise(purchase.id, base.user.id);
 
     const result = approveRefundRequest(db, id, platformAdmin.id, null, NOW);
 
-    if (!result.ok) throw new Error(result.error);
-    expect(result.email.to).toBe("test@example.com");
-    expect(result.email.subject).toBe("Refund approved — Test Course");
-    expect(result.email.body).toContain("$79.00");
+    expect(result).toEqual({ ok: true, enrollmentEnded: true });
   });
 });
 
@@ -393,7 +390,6 @@ describe("declining a Refund Request", () => {
     );
 
     if (!result.ok) throw new Error(result.error);
-    expect(result.email.body).toContain("You finished the course.");
     expect(isEnrolled(base.user.id)).toBe(true);
     expect(checkRefundRequest(db, purchase.id, base.user.id, NOW).ok).toBe(true);
   });
