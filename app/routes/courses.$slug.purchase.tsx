@@ -23,6 +23,7 @@ import { eq, and, or, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
+import { EmailNotice } from "~/components/email-notice";
 import {
   Tabs,
   TabsList,
@@ -623,6 +624,7 @@ export default function PurchaseConfirmation({
                 </TabsContent>
               </TabsContentNoShift>
             </Tabs>
+            <EmailNotice className="mt-4 text-xs text-muted-foreground" />
           </div>
         </CardContent>
       </Card>

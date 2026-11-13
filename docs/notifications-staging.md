@@ -84,3 +84,40 @@ A Claimed Seat sends both: `welcome` to the claimer and `seat-claimed` to each T
 ## Error handling
 
 2xx marks the row sent. 429 retries honouring `Retry-After` (seconds). Other 4xx marks the row dead. 5xx and network failures retry on the backoff schedule (1 min, 5 min, 30 min, 2 h, 6 h, 24 h, then dead).
+
+## Compliance: email footers, headers and unsubscribe (ticket 23)
+
+Footers, headers and templates live in Novu. None of this checklist is done by the code change.
+
+### Config (one place each)
+
+| Variable | Purpose |
+| --- | --- |
+| `NOTIFICATIONS_POSTAL_ADDRESS` | The physical address (real PO box or registered-agent address). Multi-line allowed. Shown on `/privacy`; paste the same value into the Activity template footer (Novu templates cannot read our env). **Rollout blocker until supplied.** |
+| `PRIVACY_CONTACT_EMAIL` | Privacy contact shown on `/privacy`. |
+| `NOTIFICATIONS_UNSUBSCRIBE_SECRET` | HMAC secret for signed unsubscribe tokens (`/unsubscribe/:token`). Generate a long random value. |
+
+### Transactional footer (types 1-9, every Transactional workflow)
+
+- [ ] Accurate `From` (verified Postmark sender) and `Reply-To` (monitored address).
+- [ ] Footer line, exactly: `This is a required message about your account or purchase`
+- [ ] Footer link: `Preferences` -> `<site origin>/inbox` (Preferences tab).
+- [ ] Footer link: `Privacy notice` -> `<site origin>/privacy`.
+- [ ] No unsubscribe link and no `List-Unsubscribe` header.
+
+### Activity footer (types 10-13, every Activity workflow)
+
+- [ ] Same accurate `From` / `Reply-To`.
+- [ ] "Why you got this" line, e.g. `You got this because you teach <course> on Cadence.` (adapt per type: enrolment, comment, reply, rating).
+- [ ] One-click unsubscribe link -> `<site origin>/unsubscribe/<token>` using `payload.unsubscribeUrl`. The token is made with `signUnsubscribeToken(secret, userId, activityType)` in `app/lib/unsubscribe.server.ts`. The Activity types (10-13) are not shipped yet; when they are, `notify()` must add `unsubscribeUrl` to their payloads.
+- [ ] Headers on the email step (Novu email step custom headers, if the plan supports them; otherwise ask Novu/Postmark support): `List-Unsubscribe: <https://<site origin>/unsubscribe/<token>>` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`. The route accepts the POST without login.
+- [ ] Footer link: `Preferences` -> `<site origin>/inbox`; `Privacy notice` -> `<site origin>/privacy`.
+- [ ] Physical address (the `NOTIFICATIONS_POSTAL_ADDRESS` value) in the footer.
+- [ ] Workflow identifiers match `ACTIVITY_WORKFLOW_IDS` in `app/lib/unsubscribe.server.ts` (`new-enrollment`, `new-comment`, `comment-reply`, `new-rating`). Unsubscribe calls `PATCH /v1/subscribers/:id/preferences/:workflowId` with `{"channel":{"type":"email","enabled":false}}`; confirm in staging that this matches the current Novu API and that the workflow's email channel preference is user-editable.
+- [ ] Staging check: click the unsubscribe link logged out; confirm only that type's email is off in Preferences and in-app stays on.
+
+### Other
+
+- [ ] Supply the postal address (rollout blocker).
+- [ ] Check whether Postmark can delete individual messages (runbook does not depend on it).
+- [ ] Deletion requests: follow `docs/deletion-runbook.md`.
