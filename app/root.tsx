@@ -10,6 +10,12 @@ import {
 
 import type { Route } from "./+types/root";
 import "./app.css";
+import { ensureNotificationWorker } from "~/lib/notification-worker.server";
+
+export function loader() {
+  ensureNotificationWorker();
+  return null;
+}
 
 const darkModeScript = `
 (function() {

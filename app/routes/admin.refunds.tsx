@@ -21,11 +21,8 @@ import {
   type RefundRequestForReview,
 } from "~/lib/refunds.server";
 import { RULE_BREAK_LABELS } from "~/lib/refund-rules";
-import {
-  drainOutbox,
-  notificationsEnabled,
-  notify,
-} from "~/lib/notifications.server";
+import { notify } from "~/lib/notifications.server";
+import { drainInBackground } from "~/lib/notification-worker.server";
 
 const refundFilterSchema = z
   .nativeEnum(RefundStatus)
@@ -153,9 +150,7 @@ export async function action({ request }: Route.ActionArgs) {
   }
 
   // With the flag off, rows wait unsent in the outbox.
-  if (notificationsEnabled()) {
-    await drainOutbox(db);
-  }
+  drainInBackground();
 
   return {
     success: true,

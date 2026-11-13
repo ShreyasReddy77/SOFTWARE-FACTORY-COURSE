@@ -7,11 +7,8 @@ import { courses, purchases } from "~/db/schema";
 import { eq } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
 import { raiseRefundRequest } from "~/lib/refunds.server";
-import {
-  drainOutbox,
-  notificationsEnabled,
-  notify,
-} from "~/lib/notifications.server";
+import { notify } from "~/lib/notifications.server";
+import { drainInBackground } from "~/lib/notification-worker.server";
 
 const refundParamsSchema = z.object({
   slug: z.string().min(1),
@@ -88,9 +85,7 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   // With the flag off, rows wait unsent in the outbox.
-  if (notificationsEnabled()) {
-    await drainOutbox(db);
-  }
+  drainInBackground();
 
   return redirect(result.kind === "team_licence" ? "/team" : "/settings");
 }

@@ -2,6 +2,17 @@
 
 The Novu transport (`app/lib/novu-transport.server.ts`) is selected when `NOVU_SECRET_KEY` is set; otherwise the dev transport writes JSON to `.outbox/`. The worker only runs when `NOTIFICATIONS_ENABLED=true`. See ADR 0013 and 0014.
 
+## Worker
+
+`app/lib/notification-worker.server.ts` runs an in-process `setInterval` (every 15 s) that drains the outbox. It starts on the first request (root loader), once per process (guarded across HMR), and only when `NOTIFICATIONS_ENABLED=true`. Refund routes also trigger a drain, fire and forget, so Novu latency is never in a request. It is single-process: run one web instance, or move to a separate worker before scaling out. Concurrent drains cannot double-send: a drain leases each row (pushes `nextAttemptAt` out 5 minutes) in one transaction before sending, and a row whose process died is picked up again when the lease expires.
+
+The stale-row ops alert fires when a Pending row has been due (`nextAttemptAt`) for over 15 minutes, so rows legitimately backing off do not trigger it. Dead rows alert immediately.
+
+## Rollout blockers
+
+- [ ] **`NOTIFICATIONS_UNSUBSCRIBE_SECRET` must be set.** When unset, every Activity payload (types 10-13) carries `unsubscribeUrl: null` (a warning is logged once per process). The Activity emails would then have no one-click unsubscribe link. Do not roll out Activity emails without it.
+- [ ] **The ops alert sender is a stub.** `sendEmail` in `app/lib/notifications.server.ts` only writes the alert to `.outbox/`; nobody is emailed. Wire a real mail sender (and set `OPS_ALERT_EMAIL`) before relying on dead-row or stale-row alerts.
+
 Everything below needs a human with dashboard access. None of it is done by the code change.
 
 ## Checklist
@@ -79,7 +90,7 @@ Both workflows receive:
 A Claimed Seat sends both: `welcome` to the claimer and `seat-claimed` to each Team Admin of the licence's team.
 `refund-approved` and `refund-declined` receive the same fields plus `decisionNote` (string or null; the Platform Admin note, always set on a decline).
 
-`enrollment-ended` receives only `refundRequestId`, `courseId` and `courseTitle`.
+`enrollment-ended` receives only `refundRequestId`, `courseId`, `courseTitle` and `progressKept` (always `true`). The recipient is a Lapsed Student (GLOSSARY.md): approving a refund ends the Enrollment but keeps their progress (ADR 0001, 0002), so the email should say their progress is kept.
 
 ## Activity workflows (types 10-13, ticket 24)
 

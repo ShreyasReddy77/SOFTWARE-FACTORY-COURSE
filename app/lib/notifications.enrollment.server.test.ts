@@ -118,4 +118,20 @@ describe("notify: seat claimed (type 9)", () => {
       "refund"
     );
   });
+
+  it("does not notify a claimer who is themselves a Team Admin", () => {
+    const { admin, coupon } = seat();
+    const team = db.select().from(schema.teams).get()!;
+    db.insert(schema.teamMembers)
+      .values({
+        teamId: team.id,
+        userId: base.user.id,
+        role: TeamMemberRole.Admin,
+      })
+      .run();
+
+    notify(db, { type: "seat_claimed", couponId: coupon.id });
+
+    expect(outbox().map((r) => r.recipientUserId)).toEqual([admin.id]);
+  });
 });
