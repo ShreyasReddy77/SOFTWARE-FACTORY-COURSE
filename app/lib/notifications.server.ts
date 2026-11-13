@@ -12,6 +12,7 @@ import {
   users,
   UserRole,
 } from "~/db/schema";
+import { novuTransport } from "./novu-transport.server";
 
 // ─── Notifications ───
 // The one module that owns every Notification type. Callers pass a fact about
@@ -291,6 +292,7 @@ function logAttempt(
 }
 
 function defaultTransport(): Transport {
-  // The Novu transport arrives with the Novu integration ticket.
+  const secretKey = process.env.NOVU_SECRET_KEY;
+  if (secretKey) return novuTransport({ secretKey });
   return devTransport(".outbox");
 }
