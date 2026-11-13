@@ -239,13 +239,20 @@ function welcome(
 // Every payload carries courseId (the Instructor digest is keyed on it) and an
 // unsubscribeUrl for the email footer. The actor is never a recipient.
 
+let warnedNoUnsubscribeSecret = false;
+
 function activityLinks(
   recipientUserId: number,
   activityType: ActivityType
 ): { unsubscribeUrl: string | null } {
-  return {
-    unsubscribeUrl: buildUnsubscribeUrl(recipientUserId, activityType),
-  };
+  const unsubscribeUrl = buildUnsubscribeUrl(recipientUserId, activityType);
+  if (unsubscribeUrl === null && !warnedNoUnsubscribeSecret) {
+    warnedNoUnsubscribeSecret = true;
+    console.warn(
+      "NOTIFICATIONS_UNSUBSCRIBE_SECRET is not set: Activity payloads carry unsubscribeUrl null. Do not roll out Activity emails without it."
+    );
+  }
+  return { unsubscribeUrl };
 }
 
 function newEnrollment(
@@ -404,6 +411,7 @@ function seatClaimed(
       courseId: courses.id,
       courseTitle: courses.title,
       claimerName: users.name,
+      claimerId: users.id,
     })
     .from(coupons)
     .innerJoin(courses, eq(courses.id, coupons.courseId))
@@ -424,7 +432,10 @@ function seatClaimed(
     .all();
 
   // Deliberately says nothing about the licence becoming unrefundable.
-  return admins.map((admin) => ({
+  // The actor (the claimer) is never told, even when they are a Team Admin.
+  return admins
+    .filter((admin) => admin.userId !== row.claimerId)
+    .map((admin) => ({
     type: "seat_claimed" as const,
     recipientUserId: admin.userId,
     payload: {
@@ -497,6 +508,8 @@ function refundApproved(
         refundRequestId: row.refundRequestId,
         courseId: row.courseId,
         courseTitle: row.courseTitle,
+        // The Student is Lapsed, not wiped: approval keeps progress (ADR 0001).
+        progressKept: true,
       },
     });
   }
@@ -565,6 +578,9 @@ const BACKOFF_MS = [
 ];
 const BATCH_SIZE = 20;
 const STALE_AFTER_MS = 15 * 60_000;
+// A drain claims a row by pushing nextAttemptAt out by this long. If the
+// process dies mid-send the row becomes due again when the lease runs out.
+const LEASE_MS = 5 * 60_000;
 // Sent rows hold copies of personal data (ADR 0014), so they are pruned.
 const SENT_RETENTION_MS = 7 * 86_400_000;
 
@@ -594,18 +610,9 @@ export async function drainOutbox(db: Db, options: DrainOptions = {}) {
 
   const deadIds: number[] = [];
 
-  const due = db
-    .select()
-    .from(notificationOutbox)
-    .where(
-      and(
-        eq(notificationOutbox.status, OutboxStatus.Pending),
-        lte(notificationOutbox.nextAttemptAt, now.toISOString())
-      )
-    )
-    .orderBy(asc(notificationOutbox.id))
-    .limit(BATCH_SIZE)
-    .all();
+  // Measured before claiming, so it sees rows the worker has not got to.
+  const staleRow = findStaleRow(db, now);
+  const due = claimDueRows(db, now);
 
   for (const row of due) {
     const recipient = db
@@ -656,7 +663,7 @@ export async function drainOutbox(db: Db, options: DrainOptions = {}) {
       body: `Outbox row ${id} failed permanently and was kept for replay (npm run replay-dead-notifications).`,
     });
   }
-  await alertOnStaleRow(db, target, now);
+  if (staleRow) await alertOnStaleRow(staleRow, target, now);
   pruneSentRows(db, now);
 }
 
@@ -672,26 +679,75 @@ export function resetAlertThrottle() {
   lastStaleAlertAt = 0;
 }
 
-async function alertOnStaleRow(db: Db, target: AlertTarget, now: Date) {
-  const oldest = db
+/**
+ * Atomically takes the due rows: each is leased (nextAttemptAt pushed out) in
+ * one synchronous transaction, so a concurrent drain cannot also take it.
+ */
+function claimDueRows(db: Db, now: Date): OutboxRow[] {
+  return db.transaction((tx) => {
+    const due = tx
+      .select()
+      .from(notificationOutbox)
+      .where(
+        and(
+          eq(notificationOutbox.status, OutboxStatus.Pending),
+          lte(notificationOutbox.nextAttemptAt, now.toISOString())
+        )
+      )
+      .orderBy(asc(notificationOutbox.id))
+      .limit(BATCH_SIZE)
+      .all();
+    const leaseUntil = new Date(now.getTime() + LEASE_MS).toISOString();
+    return due.filter(
+      (row) =>
+        tx
+          .update(notificationOutbox)
+          .set({ nextAttemptAt: leaseUntil })
+          .where(
+            and(
+              eq(notificationOutbox.id, row.id),
+              eq(notificationOutbox.status, OutboxStatus.Pending),
+              eq(notificationOutbox.nextAttemptAt, row.nextAttemptAt)
+            )
+          )
+          .run().changes === 1
+    );
+  });
+}
+
+/** The oldest Pending row that has been due for longer than the stale window. */
+function findStaleRow(db: Db, now: Date): OutboxRow | undefined {
+  const cutoff = new Date(now.getTime() - STALE_AFTER_MS).toISOString();
+  return db
     .select()
     .from(notificationOutbox)
-    .where(eq(notificationOutbox.status, OutboxStatus.Pending))
-    .orderBy(asc(notificationOutbox.createdAt))
+    .where(
+      and(
+        eq(notificationOutbox.status, OutboxStatus.Pending),
+        lt(notificationOutbox.nextAttemptAt, cutoff)
+      )
+    )
+    .orderBy(asc(notificationOutbox.nextAttemptAt))
     .limit(1)
     .get();
-  if (!oldest) return;
-  const ageMs = now.getTime() - Date.parse(oldest.createdAt);
-  if (ageMs <= STALE_AFTER_MS) return;
+}
+
+async function alertOnStaleRow(
+  oldest: OutboxRow,
+  target: AlertTarget,
+  now: Date
+) {
   // One alert per window, not one per drain.
   if (now.getTime() - lastStaleAlertAt < STALE_AFTER_MS) return;
   lastStaleAlertAt = now.getTime();
 
-  const minutes = Math.floor(ageMs / 60_000);
+  const minutes = Math.floor(
+    (now.getTime() - Date.parse(oldest.nextAttemptAt)) / 60_000
+  );
   await raiseAlert(target, "stale", {
     outboxId: oldest.id,
-    subject: `Notifications are stuck: oldest unsent is ${minutes} min old`,
-    body: `Outbox row ${oldest.id} has been unsent for ${minutes} minutes.`,
+    subject: `Notifications are stuck: oldest due row is ${minutes} min overdue`,
+    body: `Outbox row ${oldest.id} has been due but unsent for ${minutes} minutes.`,
   });
 }
 

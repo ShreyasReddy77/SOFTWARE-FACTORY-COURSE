@@ -14,9 +14,11 @@ export function meta() {
   return [{ title: "Unsubscribe — Cadence" }];
 }
 
+const NOT_CONFIGURED = "Unsubscribe is not configured";
+
 function checkToken(token: string) {
   const secret = process.env.NOTIFICATIONS_UNSUBSCRIBE_SECRET;
-  if (!secret) throw data("Unsubscribe is not configured", { status: 503 });
+  if (!secret) throw data(NOT_CONFIGURED, { status: 503 });
   const verified = verifyUnsubscribeToken(secret, token);
   if (!verified) throw data("This unsubscribe link is not valid", { status: 400 });
   return verified;
@@ -30,7 +32,7 @@ export async function loader({ params }: Route.LoaderArgs) {
 export async function action({ params }: Route.ActionArgs) {
   const { userId, activityType } = checkToken(params.token);
   const secretKey = process.env.NOVU_SECRET_KEY;
-  if (!secretKey) throw data("Unsubscribe is not configured", { status: 503 });
+  if (!secretKey) throw data(NOT_CONFIGURED, { status: 503 });
   try {
     await unsubscribeFromActivityType({ secretKey, userId, activityType });
   } catch {

@@ -184,6 +184,7 @@ describe("notify: refund decisions", () => {
     expect(outbox()[1].payload).toMatchObject({
       courseId: base.course.id,
       courseTitle: "Test Course",
+      progressKept: true,
     });
   });
 
@@ -397,6 +398,68 @@ describe("drainOutbox", () => {
   });
 });
 
+describe("drainOutbox concurrency", () => {
+  const NOW = new Date("2026-10-06T12:00:00.000Z");
+
+  function queueOne() {
+    notify(
+      db,
+      {
+        type: "refund_requested",
+        refundRequestId: refundId,
+        actorUserId: base.user.id,
+      },
+      NOW
+    );
+  }
+
+  it("sends a row once when two drains run at the same time", async () => {
+    queueOne();
+    const sent: string[] = [];
+    const transport: Transport = {
+      async send(message) {
+        sent.push(message.idempotencyKey);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      },
+    };
+
+    await Promise.all([
+      drainOutbox(db, { transport, enabled: true, now: NOW }),
+      drainOutbox(db, { transport, enabled: true, now: NOW }),
+    ]);
+
+    expect(sent).toHaveLength(1);
+    expect(outbox()[0].status).toBe(OutboxStatus.Sent);
+  });
+
+  it("picks a claimed row up again once its lease has expired", async () => {
+    queueOne();
+    const sent: string[] = [];
+    // A worker that claims the row and then never finishes (crash).
+    const hung: Transport = { send: () => new Promise(() => {}) };
+    const ok: Transport = {
+      async send(message) {
+        sent.push(message.idempotencyKey);
+      },
+    };
+    void drainOutbox(db, { transport: hung, enabled: true, now: NOW });
+
+    await drainOutbox(db, {
+      transport: ok,
+      enabled: true,
+      now: new Date(NOW.getTime() + 60_000),
+    });
+    expect(sent).toHaveLength(0);
+
+    await drainOutbox(db, {
+      transport: ok,
+      enabled: true,
+      now: new Date(NOW.getTime() + 10 * 60_000),
+    });
+    expect(sent).toHaveLength(1);
+  });
+});
+
 describe("drainOutbox reliability", () => {
   const NOW = new Date("2026-10-06T12:00:00.000Z");
   const minutes = (n: number) => new Date(NOW.getTime() + n * 60_000);
@@ -531,25 +594,51 @@ describe("drainOutbox reliability", () => {
     expect(mail[0].body).not.toContain("@example.com");
   });
 
-  it("alerts when the oldest unsent row is older than 15 minutes, once per window", async () => {
-    queueOne();
-    const mail: unknown[] = [];
-    const options = {
+  function alertOptions(mail: unknown[]) {
+    return {
       transport: failing(503),
       enabled: true,
       opsEmail: "ops@example.com",
       sendAlert: async (email: unknown) => void mail.push(email),
     };
+  }
+
+  it("alerts when a row has been due for over 15 minutes, once per window", async () => {
+    queueOne();
+    const mail: unknown[] = [];
     const log = silenceLog();
 
-    await drainOutbox(db, { ...options, now: minutes(14) });
+    await drainOutbox(db, { ...alertOptions(mail), now: minutes(16) });
+    expect(mail).toHaveLength(1);
+
+    await drainOutbox(db, { ...alertOptions(mail), now: minutes(20) });
+    expect(mail).toHaveLength(1);
+    log.mockRestore();
+  });
+
+  it("does not alert while the row has been due for under 15 minutes", async () => {
+    queueOne();
+    const mail: unknown[] = [];
+    const log = silenceLog();
+
+    await drainOutbox(db, { ...alertOptions(mail), now: minutes(14) });
     expect(mail).toHaveLength(0);
+    log.mockRestore();
+  });
 
-    await drainOutbox(db, { ...options, now: minutes(16) });
-    expect(mail).toHaveLength(1);
+  it("does not alert for an old row that is legitimately backing off", async () => {
+    queueOne();
+    db.update(schema.notificationOutbox)
+      .set({
+        attempts: 4,
+        nextAttemptAt: minutes(60 * 5).toISOString(),
+      })
+      .run();
+    const mail: unknown[] = [];
+    const log = silenceLog();
 
-    await drainOutbox(db, { ...options, now: minutes(20) });
-    expect(mail).toHaveLength(1);
+    await drainOutbox(db, { ...alertOptions(mail), now: minutes(60 * 3) });
+    expect(mail).toHaveLength(0);
     log.mockRestore();
   });
 
