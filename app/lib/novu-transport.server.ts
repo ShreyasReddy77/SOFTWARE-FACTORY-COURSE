@@ -19,6 +19,8 @@ const NOVU_US_API = "https://api.novu.co";
 const WORKFLOW_IDS: Record<NotificationType, string> = {
   refund_requested: "refund-requested",
   refund_awaiting_review: "refund-awaiting-review",
+  welcome: "welcome",
+  seat_claimed: "seat-claimed",
 };
 
 export type NovuTransportOptions = {

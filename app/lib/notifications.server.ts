@@ -4,11 +4,15 @@ import { and, asc, eq, lt, lte } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
 import {
+  coupons,
   courses,
+  enrollments,
   notificationOutbox,
   OutboxStatus,
   purchases,
   refunds,
+  teamMembers,
+  TeamMemberRole,
   users,
   UserRole,
 } from "~/db/schema";
@@ -28,16 +32,32 @@ type Db = BetterSQLite3Database<typeof schema>;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 export type Queryable = Db | Tx;
 
-export type NotificationType = "refund_requested" | "refund_awaiting_review";
+export type NotificationType =
+  "refund_requested" | "refund_awaiting_review" | "welcome" | "seat_claimed";
 
 /** What happened. `actorUserId` is the person who did it. */
-export type NotificationEvent = {
-  type: "refund_requested";
-  refundRequestId: number;
-  actorUserId: number;
-};
+export type NotificationEvent =
+  | {
+      type: "refund_requested";
+      refundRequestId: number;
+      actorUserId: number;
+    }
+  | {
+      /** A new Enrollment (Individual Purchase or Claimed Seat). */
+      type: "enrollment_created";
+      enrollmentId: number;
+    }
+  | {
+      /** A Student claimed a Seat; tells the Team Admin. */
+      type: "seat_claimed";
+      couponId: number;
+    };
 
-export function notify(db: Queryable, event: NotificationEvent, now = new Date()) {
+export function notify(
+  db: Queryable,
+  event: NotificationEvent,
+  now = new Date()
+) {
   const deliveries = resolveDeliveries(db, event);
   for (const delivery of deliveries) {
     db.insert(notificationOutbox)
@@ -59,10 +79,17 @@ type Delivery = {
   payload: Record<string, unknown>;
 };
 
-function resolveDeliveries(db: Queryable, event: NotificationEvent): Delivery[] {
+function resolveDeliveries(
+  db: Queryable,
+  event: NotificationEvent
+): Delivery[] {
   switch (event.type) {
     case "refund_requested":
       return refundRequested(db, event);
+    case "enrollment_created":
+      return welcome(db, event);
+    case "seat_claimed":
+      return seatClaimed(db, event);
   }
 }
 
@@ -87,7 +114,8 @@ function refundRequested(
     .where(eq(refunds.id, event.refundRequestId))
     .get();
 
-  if (!row) throw new Error(`Refund Request ${event.refundRequestId} not found`);
+  if (!row)
+    throw new Error(`Refund Request ${event.refundRequestId} not found`);
 
   const facts = {
     refundRequestId: row.refundRequestId,
@@ -119,6 +147,82 @@ function refundRequested(
   }
 
   return deliveries;
+}
+
+function welcome(
+  db: Queryable,
+  event: Extract<NotificationEvent, { type: "enrollment_created" }>
+): Delivery[] {
+  const row = db
+    .select({
+      enrollmentId: enrollments.id,
+      userId: enrollments.userId,
+      courseId: courses.id,
+      courseTitle: courses.title,
+      courseSlug: courses.slug,
+    })
+    .from(enrollments)
+    .innerJoin(courses, eq(courses.id, enrollments.courseId))
+    .where(eq(enrollments.id, event.enrollmentId))
+    .get();
+  if (!row) throw new Error(`Enrollment ${event.enrollmentId} not found`);
+
+  // Enrollment facts and a link to the course; no cross-sell.
+  return [
+    {
+      type: "welcome",
+      recipientUserId: row.userId,
+      payload: {
+        enrollmentId: row.enrollmentId,
+        courseId: row.courseId,
+        courseTitle: row.courseTitle,
+        courseUrl: `/courses/${row.courseSlug}`,
+      },
+    },
+  ];
+}
+
+function seatClaimed(
+  db: Queryable,
+  event: Extract<NotificationEvent, { type: "seat_claimed" }>
+): Delivery[] {
+  const row = db
+    .select({
+      couponId: coupons.id,
+      teamId: coupons.teamId,
+      courseId: courses.id,
+      courseTitle: courses.title,
+      claimerName: users.name,
+    })
+    .from(coupons)
+    .innerJoin(courses, eq(courses.id, coupons.courseId))
+    .innerJoin(users, eq(users.id, coupons.redeemedByUserId))
+    .where(eq(coupons.id, event.couponId))
+    .get();
+  if (!row) throw new Error(`Claimed Seat ${event.couponId} not found`);
+
+  const admins = db
+    .select({ userId: teamMembers.userId })
+    .from(teamMembers)
+    .where(
+      and(
+        eq(teamMembers.teamId, row.teamId),
+        eq(teamMembers.role, TeamMemberRole.Admin)
+      )
+    )
+    .all();
+
+  // Deliberately says nothing about the licence becoming unrefundable.
+  return admins.map((admin) => ({
+    type: "seat_claimed" as const,
+    recipientUserId: admin.userId,
+    payload: {
+      couponId: row.couponId,
+      courseId: row.courseId,
+      courseTitle: row.courseTitle,
+      claimerName: row.claimerName,
+    },
+  }));
 }
 
 // ─── Transport ───
