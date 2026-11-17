@@ -3,13 +3,17 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
 import { LandingHero } from "./landing-hero";
 
+function renderHero() {
+  return renderToStaticMarkup(
+    <MemoryRouter>
+      <LandingHero />
+    </MemoryRouter>
+  );
+}
+
 describe("LandingHero", () => {
   it("left-aligns the headline, copy and call to action", () => {
-    const html = renderToStaticMarkup(
-      <MemoryRouter>
-        <LandingHero />
-      </MemoryRouter>
-    );
+    const html = renderHero();
     const section = html.match(/^<section class="([^"]*)"/)?.[1];
     const actions = html.match(/<div class="([^"]*)"><a /)?.[1];
     expect(section?.split(" ")).toContain("text-left");
@@ -20,11 +24,7 @@ describe("LandingHero", () => {
   });
 
   it("links the call to action to the course catalogue", () => {
-    const html = renderToStaticMarkup(
-      <MemoryRouter>
-        <LandingHero />
-      </MemoryRouter>
-    );
+    const html = renderHero();
     expect(html).toMatch(/<a[^>]*href="\/courses"[^>]*>Browse Courses/);
   });
 });
