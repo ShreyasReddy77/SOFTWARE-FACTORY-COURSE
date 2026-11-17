@@ -42,6 +42,10 @@ Test setup calls the module's own functions. When the function you need does
 not exist, add it to the module rather than inserting rows directly, so a
 change to how the module stores its data leaves its tests alone.
 
+Data no module owns (users, enrollments) is the exception: arrange it through
+one shared helper in `app/test/`, not a fresh `db.insert` in each module's
+fixtures.
+
 ## Keep files under 5000 tokens
 
 Keep every file under 5000 tokens.
@@ -107,9 +111,38 @@ const [items, setItems] = useState(rows);
 const count = items.length;
 ```
 
-## A comment explains why
+## Keep why out of comments
 
-Name and extract until a comment is unnecessary. A comment earns its place
-only for a _why_ the code cannot express: a constraint, a decision, a link to
-the ADR behind it. A comment that restates _what_ the code does goes stale the
-first time the code changes.
+Name and extract until a comment is unnecessary. A comment that restates
+_what_ the code does goes stale the first time the code changes.
+
+A product decision or a long _why_ does not belong in a comment either: it
+goes stale with the product, and nothing checks it. Delete the comment. If the
+decision still matters, record it as an ADR in `docs/adr/` and leave a one-line
+link at most. A diff that adds several why-comments is a finding in itself: the
+decision was never written down. Name it in the PR.
+
+## Client state predicts the action, with the action's functions
+
+State the UI shows (valid, saved, unsaved, empty) is computed with the same
+normalising the action applies: call the shared function, never re-implement
+the trim or the coercion. The notes editor compared the raw draft while the
+action trimmed it first, so "Unsaved changes" stuck on after every save.
+
+## A move is a move
+
+A commit that moves code leaves its behaviour alone. Put a behaviour change,
+even a one-line `key`, in its own commit, or name it in the message. A reader
+trusts "moved verbatim" and skips the diff.
+
+## Code that moves starts clean
+
+Moving code into a new file is the moment to retire its debt: split the long
+function, flatten the nesting. A new file does not enter a lint exemption list
+(`scripts/check-lint-exemptions.js` fails the commit that adds it).
+
+## Do what the ticket asked
+
+A ticket for a restyle ships a restyle. A new counter, a new state, a new
+module, a privacy line: each is scope the ticket did not ask for. Remove it, or
+put it in a follow-up ticket.
