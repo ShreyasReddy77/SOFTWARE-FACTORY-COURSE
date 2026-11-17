@@ -7,7 +7,12 @@ Do these checks in this order before you report a change to `app/` as complete:
 3. `npm run test`
 4. `npm run test:mutation`
 
-Or run the first three with `npm run check`.
+Or run the first three with `npm run check`. Run `test:mutation` once, after
+the last code change: it takes minutes.
+
+Before you edit a file, run `node scripts/check-file-tokens.js <file>`. A file
+over 5000 tokens fails the commit hook, so an edit there means splitting the
+file first. Learn this before you build, not at commit time.
 
 `npm run lint:oxlint` lints the whole repository with oxlint (`.oxlintrc.json`).
 
