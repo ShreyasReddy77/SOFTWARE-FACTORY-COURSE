@@ -7,15 +7,13 @@ import { Textarea } from "~/components/ui/textarea";
 import { cn, formatRelativeTime } from "~/lib/utils";
 import { noteEditorState, type NoteEditorStatus } from "~/modules/note-editor";
 
+type SavedNote = { body: string; updatedAt: string };
+
 /**
  * The Student's private Note on a Lesson. Laid out like the Questions &
  * Discussion card so the two read as one family on the Lesson page.
  */
-export function LessonNote({
-  note,
-}: {
-  note: { body: string; updatedAt: string } | null;
-}) {
+export function LessonNote({ note }: { note: SavedNote | null }) {
   const fetcher = useFetcher<{ ok: boolean; error?: string }>();
   const [draft, setDraft] = useState(note?.body ?? "");
   const { status, canSave, counter } = noteEditorState({
@@ -86,7 +84,7 @@ function NoteStatus({
 }: {
   status: NoteEditorStatus;
   error: string | undefined;
-  note: { updatedAt: string } | null;
+  note: SavedNote | null;
 }) {
   if (error) return <span className="text-sm text-destructive">{error}</span>;
   if (status === "unsaved") {
