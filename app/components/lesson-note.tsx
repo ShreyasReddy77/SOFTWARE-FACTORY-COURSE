@@ -94,6 +94,13 @@ function NoteStatus({
       <span className="text-xs text-muted-foreground">Unsaved changes</span>
     );
   }
+  if (status === "empty" && note) {
+    return (
+      <span className="text-xs text-muted-foreground">
+        A note cannot be empty. Your saved note is kept.
+      </span>
+    );
+  }
   if (status === "saved" && note) {
     return (
       <span suppressHydrationWarning className="text-xs text-muted-foreground">
