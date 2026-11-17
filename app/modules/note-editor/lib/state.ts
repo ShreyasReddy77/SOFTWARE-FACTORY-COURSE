@@ -13,8 +13,10 @@ export function noteEditorState(
   savedBody: string | null,
   isSaving: boolean
 ): NoteEditorState {
-  const counter = `${draft.length.toLocaleString("en")} / ${MAX_NOTE_LENGTH.toLocaleString("en")}`;
-  const status = statusOf(draft, savedBody);
+  // The action trims before it checks and stores, so judge what it will keep.
+  const body = draft.trim();
+  const counter = `${body.length.toLocaleString("en")} / ${MAX_NOTE_LENGTH.toLocaleString("en")}`;
+  const status = statusOf(body, savedBody);
   return {
     status,
     canSave: status === "unsaved" && !isSaving,
@@ -22,10 +24,9 @@ export function noteEditorState(
   };
 }
 
-function statusOf(draft: string, savedBody: string | null): NoteEditorStatus {
-  if (draft.length > MAX_NOTE_LENGTH) return "too-long";
-  // Saving whitespace is rejected by the action, so it counts as empty.
-  if (draft.trim().length === 0) return "empty";
-  if (draft === savedBody) return "saved";
+function statusOf(body: string, savedBody: string | null): NoteEditorStatus {
+  if (body.length > MAX_NOTE_LENGTH) return "too-long";
+  if (body.length === 0) return "empty";
+  if (body === savedBody) return "saved";
   return "unsaved";
 }

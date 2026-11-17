@@ -77,4 +77,24 @@ describe("noteEditorState", () => {
       counter: "2,001 / 2,000",
     });
   });
+
+  it("is saved after saving a draft with edge whitespace, which the action trims", () => {
+    const state = noteEditorState({
+      draft: "Use Result\n",
+      savedBody: "Use Result",
+      isSaving: false,
+    });
+    expect(state.status).toBe("saved");
+    expect(state.canSave).toBe(false);
+  });
+
+  it("allows a draft at the maximum length plus edge whitespace", () => {
+    const state = noteEditorState({
+      draft: `${"a".repeat(MAX_NOTE_LENGTH)} `,
+      savedBody: null,
+      isSaving: false,
+    });
+    expect(state.status).toBe("unsaved");
+    expect(state.counter).toBe("2,000 / 2,000");
+  });
 });
